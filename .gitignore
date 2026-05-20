@@ -1,0 +1,8 @@
+# Ignorar entornos virtuales y carpetas de resultados
+__pycache__/
+data/
+env/
+Resultados/
+
+
+
