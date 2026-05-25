@@ -374,7 +374,7 @@ def page_portada(pdf, seg_ckpt, rc2_ckpt, rc3_ckpt):
     for i, (k, v) in enumerate([
         ('Inputs',       'C2_prep[N] + C2_diff[N] + C3_prep[N]'),
         ('Arquitectura', 'U-Net + EfficientNet-B0 (ImageNet pretrained)'),
-        ('Dataset',      '38 pares train / 6 pares val (split cronológico)'),
+        ('Dataset',      '39 pares train / 6 pares val (split cronológico)'),
         ('Reporte',      f"Modo de visualización: {MODO_FRAMES}"),
     ]):
         y = 0.34 - i * 0.048

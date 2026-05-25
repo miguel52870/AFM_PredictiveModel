@@ -514,33 +514,51 @@ def plot_sin_gt(results, out_dir):
         plt.savefig(str(fname), dpi=150, bbox_inches='tight')
         plt.close()
 
+    # PNG resumen — 4 filas: pred / pred anterior / |pred-anterior| / |pred-ultimo real|
     n = len(results)
     ncols = n + 1
-    fig, axes = plt.subplots(3, ncols, figsize=(4*ncols, 12))
+    fig, axes = plt.subplots(4, ncols, figsize=(4*ncols, 16))
     fig.suptitle(
         f"C3 encadenado sin GT  frames {results[0]['pos_out']}-{results[-1]['pos_out']}\n"
         f"Col 0 = {lbl_ultimo}  |  Col 1..N = predicciones encadenadas",
         fontsize=10, fontweight='bold')
+
     axes[0, 0].imshow(ultimo_real, cmap='twilight', vmin=0, vmax=1)
     axes[0, 0].set_title(lbl_ultimo, fontsize=8)
     axes[0, 0].axis('off')
     axes[1, 0].axis('off')
     axes[2, 0].axis('off')
+    axes[3, 0].axis('off')
+
     for i, r in enumerate(results):
-        pred_a = results[i-1]['pred'] if i > 0 else ultimo_real
+        pred_a  = results[i-1]['pred'] if i > 0 else ultimo_real
+        label_a = f"Frame {results[i-1]['pos_out']} pred." if i > 0 else lbl_ultimo
+
+        # Fila 0 — predicción actual
         axes[0, i+1].imshow(r['pred'], cmap='twilight', vmin=0, vmax=1)
         axes[0, i+1].set_title(f"Frame {r['pos_out']}\nPaso {r['paso']}", fontsize=8)
         axes[0, i+1].axis('off')
-        axes[1, i+1].imshow(np.abs(r['pred']-ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
-        axes[1, i+1].set_title('|Pred - Ultimo real|', fontsize=7)
+
+        # Fila 1 — predicción anterior (o último real para paso 1)
+        axes[1, i+1].imshow(pred_a, cmap='twilight', vmin=0, vmax=1)
+        axes[1, i+1].set_title(label_a, fontsize=8)
         axes[1, i+1].axis('off')
-        axes[2, i+1].imshow(np.abs(r['pred']-pred_a), cmap='Reds', vmin=0, vmax=0.5)
-        axes[2, i+1].set_title('|Pred - Anterior|', fontsize=7)
+
+        # Fila 2 — error entre pred actual y pred anterior
+        axes[2, i+1].imshow(np.abs(r['pred'] - pred_a), cmap='Reds', vmin=0, vmax=0.5)
+        axes[2, i+1].set_title('|Pred − Anterior|', fontsize=7)
         axes[2, i+1].axis('off')
+
+        # Fila 3 — deriva acumulada respecto al último real conocido
+        axes[3, i+1].imshow(np.abs(r['pred'] - ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
+        axes[3, i+1].set_title('|Pred − Último real|', fontsize=7)
+        axes[3, i+1].axis('off')
+
     for row_i, (lab, col) in enumerate([
-        ('C3 predicho',       '#0F6E56'),
-        ('vs. Ultimo real',   '#D85A30'),
-        ('vs. Pred. anterior','#534AB7'),
+        ('C3 predicho',        '#1D9E75'),
+        ('Pred. anterior',     '#0E7A56'),
+        ('vs. Pred. anterior', '#534AB7'),
+        ('vs. Último real',    '#D85A30'),
     ]):
         axes[row_i, 0].set_ylabel(lab, fontsize=9, fontweight='bold', color=col)
     plt.tight_layout()
