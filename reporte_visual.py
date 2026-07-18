@@ -121,12 +121,13 @@ def read_ckpt_info(path):
     # Retornar todo el dict excepto model_state para no ocupar memoria
     return {k: v for k, v in ckpt.items() if k != 'model_state'}
 
-def load_npy(path):
-    """Carga NPY y normaliza a [0,1]."""
+def load_npy(path, normalize=True):
+    """Carga NPY y opcionalmente normaliza a [0,1]."""
     arr = np.load(str(path)).astype(np.float32)
-    mn, mx = arr.min(), arr.max()
-    if mx - mn > 1e-8:
-        arr = (arr - mn) / (mx - mn)
+    if normalize:
+        mn, mx = arr.min(), arr.max()
+        if mx - mn > 1e-8:
+            arr = (arr - mn) / (mx - mn)
     return arr
 
 def get_npy_files(folder, pattern='*_indep_pred.npy'):
@@ -162,13 +163,13 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
 
     # Archivos con GT
     pred_seg_gt  = _get(seg_npy/'pred',  f'*_{sufijo}_pred.npy')
-    real_seg_gt  = _get(seg_npy/'real',  f'*_{sufijo}_real.npy')
+    real_seg_gt  = _get(seg_npy/'pred_con_gt',  f'*_{sufijo}_pred_con_gt.npy')
     error_seg_gt = _get(seg_npy/'error', f'*_{sufijo}_error.npy')
     pred_rc2_gt  = _get(rc2_npy/'pred',  f'*_{sufijo}_pred.npy')
-    real_rc2_gt  = _get(rc2_npy/'real',  f'*_{sufijo}_real.npy')
+    real_rc2_gt  = _get(rc2_npy/'pred_con_gt',  f'*_{sufijo}_pred_con_gt.npy')
     error_rc2_gt = _get(rc2_npy/'error', f'*_{sufijo}_error.npy')
     pred_rc3_gt  = _get(rc3_npy/'pred',  f'*_{sufijo}_pred.npy')
-    real_rc3_gt  = _get(rc3_npy/'real',  f'*_{sufijo}_real.npy')
+    real_rc3_gt  = _get(rc3_npy/'pred_con_gt',  f'*_{sufijo}_pred_con_gt.npy')
     error_rc3_gt = _get(rc3_npy/'error', f'*_{sufijo}_error.npy')
 
     # Archivos sin GT (sufijo _sin_gt_pred.npy)
@@ -180,7 +181,8 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
         try: return int(path.stem.split('_')[1])
         except: return 0
 
-    def _load(path): return load_npy(path) if path else None
+    def _load(path): return load_npy(path, normalize=True) if path else None
+    def _load_error(path): return load_npy(path, normalize=False) if path else None
 
     frames = {}
 
@@ -191,13 +193,13 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
             'frame': fn, 'modo': modo, 'has_gt': True,
             'seg_pred':  _load(pred_seg_gt[i]),
             'seg_real':  _load(real_seg_gt[i])  if i < len(real_seg_gt)  else None,
-            'seg_error': _load(error_seg_gt[i]) if i < len(error_seg_gt) else None,
+            'seg_error': _load_error(error_seg_gt[i]) if i < len(error_seg_gt) else None, # <-- Modificado
             'rc2_pred':  _load(pred_rc2_gt[i]),
             'rc2_real':  _load(real_rc2_gt[i])  if i < len(real_rc2_gt)  else None,
-            'rc2_error': _load(error_rc2_gt[i]) if i < len(error_rc2_gt) else None,
+            'rc2_error': _load_error(error_rc2_gt[i]) if i < len(error_rc2_gt) else None, # <-- Modificado
             'rc3_pred':  _load(pred_rc3_gt[i]),
             'rc3_real':  _load(real_rc3_gt[i])  if i < len(real_rc3_gt)  else None,
-            'rc3_error': _load(error_rc3_gt[i]) if i < len(error_rc3_gt) else None,
+            'rc3_error': _load_error(error_rc3_gt[i]) if i < len(error_rc3_gt) else None, # <-- Modificado
         }
 
     # Registrar frames sin GT
@@ -225,17 +227,34 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
         rc2_cur  = _load(pred_rc2_sgt[i])
         rc3_cur  = _load(pred_rc3_sgt[i])
 
+        # Intentar cargar error sin GT desde disco (generado por run_sin_gt)
+        def _load_error_sgt(npy_dir, fn):
+            cands = list(Path(npy_dir / 'error').glob(f'frame_{fn:03d}_sin_gt_error.npy'))
+            return _load(cands[0]) if cands else None
+
+        seg_err = _load_error_sgt(seg_npy, fn)
+        rc2_err = _load_error_sgt(rc2_npy, fn)
+        rc3_err = _load_error_sgt(rc3_npy, fn)
+
+        # Si no existe en disco, calcular en memoria
+        if seg_err is None and seg_cur is not None and seg_prev is not None:
+            seg_err = np.abs(seg_cur - seg_prev)
+        if rc2_err is None and rc2_cur is not None and rc2_prev is not None:
+            rc2_err = np.abs(rc2_cur - rc2_prev)
+        if rc3_err is None and rc3_cur is not None and rc3_prev is not None:
+            rc3_err = np.abs(rc3_cur - rc3_prev)
+
         frames[fn] = {
             'frame': fn, 'modo': 'sin_gt', 'has_gt': False,
             'seg_pred':  seg_cur,
-            'seg_real':  seg_prev,  # mascara predicha anterior (binaria)
-            'seg_error': np.abs(seg_cur - seg_prev) if seg_cur is not None and seg_prev is not None else None,
+            'seg_real':  seg_prev,
+            'seg_error': seg_err,
             'rc2_pred':  rc2_cur,
             'rc2_real':  rc2_prev,
-            'rc2_error': np.abs(rc2_cur - rc2_prev) if rc2_cur is not None and rc2_prev is not None else None,
+            'rc2_error': rc2_err,
             'rc3_pred':  rc3_cur,
             'rc3_real':  rc3_prev,
-            'rc3_error': np.abs(rc3_cur - rc3_prev) if rc3_cur is not None and rc3_prev is not None else None,
+            'rc3_error': rc3_err,
         }
 
     if not frames:
@@ -374,7 +393,7 @@ def page_portada(pdf, seg_ckpt, rc2_ckpt, rc3_ckpt):
     for i, (k, v) in enumerate([
         ('Inputs',       'C2_prep[N] + C2_diff[N] + C3_prep[N]'),
         ('Arquitectura', 'U-Net + EfficientNet-B0 (ImageNet pretrained)'),
-        ('Dataset',      '39 pares train / 6 pares val (split cronológico)'),
+        ('Dataset',      '38 pares train / 6 pares val (split cronológico)'),
         ('Reporte',      f"Modo de visualización: {MODO_FRAMES}"),
     ]):
         y = 0.34 - i * 0.048
@@ -526,7 +545,7 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
         (frame_data['seg_pred'],  'Mascara predicha\n(binaria)',
          'gray', 0, 1),
         (frame_data['seg_real'],
-         'Mascara real\n(Otsu)' if has_gt else f'Mask pred\nframe {fn-1}',
+         'GT (Otsu)' if has_gt else f'Pred\nframe {fn-1}',
          'gray', 0, 1),
         (frame_data['seg_error'],
          'Error seg.\n|pred-real|' if has_gt else f'|mask{fn} - mask{fn-1}|',
@@ -541,7 +560,7 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
         (frame_data['rc2_pred'],
          'C2 predicho\n(amplitud)', 'RdBu_r', 0, 1),
         (frame_data['rc2_real'],
-         'C2 real' if has_gt else f'C2 pred\nframe {fn-1}', 'RdBu_r', 0, 1),
+         'C2 GT' if has_gt else f'C2 pred\nframe {fn-1}', 'RdBu_r', 0, 1),
         (frame_data['rc2_error'],
          'Error C2\n|pred-real|' if has_gt else f'|C2_{fn} - C2_{fn-1}|', 'Reds', 0, 0.5),
     ]):
@@ -554,7 +573,7 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
         (frame_data['rc3_pred'],
          'C3 predicho\n(fase)', 'twilight', 0, 1),
         (frame_data['rc3_real'],
-         'C3 real' if has_gt else f'C3 pred\nframe {fn-1}', 'twilight', 0, 1),
+         'C3 GT' if has_gt else f'C3 pred\nframe {fn-1}', 'twilight', 0, 1),
         (frame_data['rc3_error'],
          'Error C3\n|pred-real|' if has_gt else f'|C3_{fn} - C3_{fn-1}|', 'Reds', 0, 0.5),
     ]):

@@ -18,10 +18,10 @@ Para frames sin ground truth (PREDICT_TO > n_archivos):
 
 Carpetas de salida en resultados/modelo_regresion_c3/predicciones/:
   npy/pred/   <- C3 predicho (con y sin GT)
-  npy/real/   <- C3 real (solo con GT)
+  npy/pred_con_gt/ <- C3 real/GT (solo con GT)
   npy/error/  <- |pred - real| (solo con GT)
   png/pred/
-  png/real/
+  png/pred_con_gt/
   png/error/
   figuras/    <- PNGs de visualización por frame y resúmenes
 """
@@ -53,14 +53,16 @@ CKPT_PATH    = BASE_DIR / 'resultados' / 'modelo_regresion_c3' / 'checkpoints' /
 OUTPUT_DIR   = BASE_DIR / 'resultados' / 'modelo_regresion_c3' / 'predicciones'
 
 # Diffs encadenados generados por inferencia_regresion_C2.py
-DIR_DIFF_PRED = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'diff_pred'
+DIR_DIFF_PRED  = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'diff_pred'
+# C2 predicho para usar como C2_prep input en frames sin GT
+DIR_PRED_C2    = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'pred_c2'
 
 # Subcarpetas de salida
 NPY_PRED  = OUTPUT_DIR / 'npy' / 'pred'
-NPY_REAL  = OUTPUT_DIR / 'npy' / 'real'
+NPY_REAL  = OUTPUT_DIR / 'npy' / 'pred_con_gt'
 NPY_ERROR = OUTPUT_DIR / 'npy' / 'error'
 PNG_PRED  = OUTPUT_DIR / 'png' / 'pred'
-PNG_REAL  = OUTPUT_DIR / 'png' / 'real'
+PNG_REAL  = OUTPUT_DIR / 'png' / 'pred_con_gt'
 PNG_ERROR = OUTPUT_DIR / 'png' / 'error'
 FIG_DIR   = OUTPUT_DIR / 'figuras'
 
@@ -105,7 +107,9 @@ idx_c3_prep   = build_file_index(DIR_C3_PREP)
 idx_c3_target = build_file_index(DIR_C3_PREP)
 
 # Indice de diffs encadenados (puede estar vacio si no se corrio C2 antes)
-idx_diff_pred = build_file_index(DIR_DIFF_PRED) if DIR_DIFF_PRED.exists() else []
+idx_diff_pred  = build_file_index(DIR_DIFF_PRED) if DIR_DIFF_PRED.exists() else []
+# Indice de C2 predicho (para usar como C2_prep en frames sin GT)
+idx_pred_c2    = build_file_index(DIR_PRED_C2)   if DIR_PRED_C2.exists()   else []
 
 # =================================================================
 # 3. UTILIDADES
@@ -154,6 +158,17 @@ def load_diff_pred(frame_out):
     for f in idx_diff_pred:
         if f.stem == stem_buscado:
             return np.load(str(f)).astype(np.float32)
+    return None
+
+def load_pred_c2(frame_out):
+    """Carga C2 predicho del frame indicado. None si no existe."""
+    stem_buscado = f"frame_{frame_out:03d}_sin_gt_pred_c2"
+    for f in idx_pred_c2:
+        if f.stem == stem_buscado:
+            arr = np.load(str(f)).astype(np.float32)
+            mn, mx = arr.min(), arr.max()
+            if mx - mn > 1e-8: arr = (arr - mn) / (mx - mn)
+            return arr
     return None
 
 # =================================================================
@@ -216,7 +231,7 @@ def run_independiente(model, device, positions):
 
         stem = f"frame_{pos+1:03d}_indep"
         save_frame_files(pred,                   stem + '_pred',  NPY_PRED,  PNG_PRED,  'twilight')
-        save_frame_files(c3_real,                stem + '_real',  NPY_REAL,  PNG_REAL,  'twilight')
+        save_frame_files(c3_real,                stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'twilight')
         save_frame_files(np.abs(pred - c3_real), stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -259,7 +274,7 @@ def run_autoregresiva(model, device, positions):
 
         stem = f"frame_{pos+1:03d}_auto"
         save_frame_files(pred,                   stem + '_pred',  NPY_PRED,  PNG_PRED,  'twilight')
-        save_frame_files(c3_real,                stem + '_real',  NPY_REAL,  PNG_REAL,  'twilight')
+        save_frame_files(c3_real,                stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'twilight')
         save_frame_files(np.abs(pred - c3_real), stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -298,9 +313,15 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
     prev_pred = None
 
     for i, pos in enumerate(positions):
-        # C2_prep: clamp al ultimo disponible
-        c2_pos  = min(pos, n_c2)
-        c2_prep = load_npy(get_file(idx_c2_prep, c2_pos))
+        # C2_prep: usar C2 predicho si existe, sino último real disponible
+        c2_pred = load_pred_c2(pos + 1)
+        if c2_pred is not None:
+            c2_prep  = c2_pred
+            c2p_src  = f'C2 predicho frame {pos+1}'
+        else:
+            c2_pos   = min(pos, n_c2)
+            c2_prep  = load_npy(get_file(idx_c2_prep, c2_pos))
+            c2p_src  = f'C2 real (pos {c2_pos})'
 
         # C2_diff: diff encadenado de C2 si existe, sino ultimo real
         diff_pred = load_diff_pred(pos + 1)
@@ -326,10 +347,20 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
         tensor = build_input_tensor(c2_prep, c2_diff, c3_input, device)
         pred   = predict(model, tensor)
 
-        print(f"  Frame {pos+1:>3} (paso {i+1:>2}) | C3: {fuente} | diff: {diff_fuente}")
+        print(f"  Frame {pos+1:>3} (paso {i+1:>2}) | C2: {c2p_src} | C3: {fuente} | diff: {diff_fuente}")
 
         stem = f"frame_{pos+1:03d}_sin_gt"
         save_frame_files(pred, stem + '_pred', NPY_PRED, PNG_PRED, 'twilight')
+
+        # Error sin GT: |pred_actual - pred_anterior|
+        # Para paso 0: prev_pred es None → comparar contra último real disponible
+        if prev_pred is not None:
+            ref_error = prev_pred
+        else:
+            ref_pos   = min(pos, len(idx_c3_prep))
+            ref_error = load_npy(get_file(idx_c3_prep, ref_pos))
+        error_sgt = np.abs(pred - ref_error).astype(np.float32)
+        save_frame_files(error_sgt, stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
             'pos_in': pos, 'pos_out': pos + 1, 'paso': i + 1,
@@ -514,51 +545,33 @@ def plot_sin_gt(results, out_dir):
         plt.savefig(str(fname), dpi=150, bbox_inches='tight')
         plt.close()
 
-    # PNG resumen — 4 filas: pred / pred anterior / |pred-anterior| / |pred-ultimo real|
     n = len(results)
     ncols = n + 1
-    fig, axes = plt.subplots(4, ncols, figsize=(4*ncols, 16))
+    fig, axes = plt.subplots(3, ncols, figsize=(4*ncols, 12))
     fig.suptitle(
         f"C3 encadenado sin GT  frames {results[0]['pos_out']}-{results[-1]['pos_out']}\n"
         f"Col 0 = {lbl_ultimo}  |  Col 1..N = predicciones encadenadas",
         fontsize=10, fontweight='bold')
-
     axes[0, 0].imshow(ultimo_real, cmap='twilight', vmin=0, vmax=1)
     axes[0, 0].set_title(lbl_ultimo, fontsize=8)
     axes[0, 0].axis('off')
     axes[1, 0].axis('off')
     axes[2, 0].axis('off')
-    axes[3, 0].axis('off')
-
     for i, r in enumerate(results):
-        pred_a  = results[i-1]['pred'] if i > 0 else ultimo_real
-        label_a = f"Frame {results[i-1]['pos_out']} pred." if i > 0 else lbl_ultimo
-
-        # Fila 0 — predicción actual
+        pred_a = results[i-1]['pred'] if i > 0 else ultimo_real
         axes[0, i+1].imshow(r['pred'], cmap='twilight', vmin=0, vmax=1)
         axes[0, i+1].set_title(f"Frame {r['pos_out']}\nPaso {r['paso']}", fontsize=8)
         axes[0, i+1].axis('off')
-
-        # Fila 1 — predicción anterior (o último real para paso 1)
-        axes[1, i+1].imshow(pred_a, cmap='twilight', vmin=0, vmax=1)
-        axes[1, i+1].set_title(label_a, fontsize=8)
+        axes[1, i+1].imshow(np.abs(r['pred']-ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
+        axes[1, i+1].set_title('|Pred - Ultimo real|', fontsize=7)
         axes[1, i+1].axis('off')
-
-        # Fila 2 — error entre pred actual y pred anterior
-        axes[2, i+1].imshow(np.abs(r['pred'] - pred_a), cmap='Reds', vmin=0, vmax=0.5)
-        axes[2, i+1].set_title('|Pred − Anterior|', fontsize=7)
+        axes[2, i+1].imshow(np.abs(r['pred']-pred_a), cmap='Reds', vmin=0, vmax=0.5)
+        axes[2, i+1].set_title('|Pred - Anterior|', fontsize=7)
         axes[2, i+1].axis('off')
-
-        # Fila 3 — deriva acumulada respecto al último real conocido
-        axes[3, i+1].imshow(np.abs(r['pred'] - ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
-        axes[3, i+1].set_title('|Pred − Último real|', fontsize=7)
-        axes[3, i+1].axis('off')
-
     for row_i, (lab, col) in enumerate([
-        ('C3 predicho',        '#1D9E75'),
-        ('Pred. anterior',     '#0E7A56'),
-        ('vs. Pred. anterior', '#534AB7'),
-        ('vs. Último real',    '#D85A30'),
+        ('C3 predicho',       '#0F6E56'),
+        ('vs. Ultimo real',   '#D85A30'),
+        ('vs. Pred. anterior','#534AB7'),
     ]):
         axes[row_i, 0].set_ylabel(lab, fontsize=9, fontweight='bold', color=col)
     plt.tight_layout()

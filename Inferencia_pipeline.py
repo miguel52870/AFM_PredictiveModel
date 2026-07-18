@@ -7,8 +7,11 @@ Ejecuta secuencialmente:
   2. inferencia_regresion_C3   → usa diffs de C2, genera C3 predicho
   3. inferencia_segmentacion   → usa diffs de C2, genera máscaras predichas
 
-El orden es importante: C2 genera los diffs encadenados que C3 y segmentación
-necesitan para frames sin ground truth.
+El orden es importante:
+  - C2 genera los diffs encadenados Y el C2_prep predicho
+  - C3 usa el C2_prep predicho de C2 como input (frames sin GT)
+  - Seg usa el C2_prep predicho de C2 y el C3_prep predicho de C3 (frames sin GT)
+Para frames sin GT los 3 canales de entrada son completamente predichos.
 
 Uso:
   python inferencia_pipeline.py
@@ -34,7 +37,7 @@ from pathlib import Path
 # (editar aquí — se propaga a los 3 scripts de inferencia)
 # =================================================================
 
-BASE_DIR = Path(r'C:\Users\migue\Desktop\modelo_predictivo')
+BASE_DIR = Path(r'C:\Users\migue\Desktop\modelo_predictivo\scripts')
 
 # ── Recorte ──────────────────────────────────────────────────────
 CROP_MODE   = 'cuadrado'   # 'cuadrado' | 'rectangular'
@@ -43,21 +46,17 @@ CROP_WIDTH  = 80           # solo si CROP_MODE = 'rectangular' (divisible por 32
 CROP_HEIGHT = 64           # solo si CROP_MODE = 'rectangular' (divisible por 32)
 
 # ── Frames a predecir ────────────────────────────────────────────
-# Los valores refieren a los frames PREDICHOS (no a los inputs)
-# PREDICT_FROM = 36 → predice frame 36 usando frame 35 como input
-# PREDICT_FROM = 41 con 40 archivos → predicción sin ground truth (encadenada)
 PREDICT_FROM   = 36
-PREDICT_TO     = 40
+PREDICT_TO     = 45
 
 # ── Modo de inferencia ───────────────────────────────────────────
-INFERENCE_MODE = 'ambos'   # 'independiente' | 'autoregresiva' | 'ambos'
+INFERENCE_MODE = 'ambos'
 
 # ── Threshold de binarización (segmentación) ─────────────────────
 THRESHOLD    = 0.5
 
 # ── Modelos a correr ─────────────────────────────────────────────
-# True = incluir en el pipeline | False = omitir
-CORRER_C2  = True   # IMPORTANTE: correr C2 primero genera diffs para C3 y seg
+CORRER_C2  = True
 CORRER_C3  = True
 CORRER_SEG = True
 
@@ -84,14 +83,12 @@ def fmt_tiempo(segundos):
     return f"{s}s"
 
 def cargar_modulo(nombre, script_path):
-    """Carga un script de inferencia como módulo Python."""
     spec = importlib.util.spec_from_file_location(nombre, str(script_path))
     mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 def inyectar_config(mod):
-    """Sobreescribe la configuración del módulo con los valores globales."""
     mod.PREDICT_FROM   = PREDICT_FROM
     mod.PREDICT_TO     = PREDICT_TO
     mod.INFERENCE_MODE = INFERENCE_MODE
@@ -100,8 +97,6 @@ def inyectar_config(mod):
     mod.CROP_SIZE      = CROP_SIZE
     mod.CROP_WIDTH     = CROP_WIDTH
     mod.CROP_HEIGHT    = CROP_HEIGHT
-
-    # Recalcular dimensiones derivadas
     if CROP_MODE == 'cuadrado':
         mod.CROP_W = CROP_SIZE
         mod.CROP_H = CROP_SIZE
@@ -109,30 +104,21 @@ def inyectar_config(mod):
         mod.CROP_W = CROP_WIDTH
         mod.CROP_H = CROP_HEIGHT
 
-    # Reconstruir índices de archivos con las rutas correctas
-    # (ya están definidas en el módulo al cargar, solo inyectamos parámetros)
-
 def correr_inferencia(nombre, script_path):
-    """Carga, configura y ejecuta el script de inferencia."""
     print(f"\n{'='*65}")
     print(f"  INFERENCIA: {nombre}")
     print(f"{'='*65}")
-
     if not script_path.exists():
         print(f"  ERROR: script no encontrado en {script_path}")
         return False
-
     try:
         mod = cargar_modulo(nombre, script_path)
         inyectar_config(mod)
-
         t0 = time.time()
         mod.main()
         elapsed = time.time() - t0
-
         print(f"\n  [{nombre}] Completado en {fmt_tiempo(elapsed)}")
         return True
-
     except Exception as e:
         import traceback
         print(f"\n  [{nombre}] ERROR: {e}")
@@ -147,7 +133,6 @@ def main():
     print("=" * 65)
     print("  PIPELINE DE INFERENCIA")
     print("=" * 65)
-
     crop_label = (f"{CROP_SIZE}px" if CROP_MODE == 'cuadrado'
                   else f"{CROP_WIDTH}x{CROP_HEIGHT}px")
     print(f"\nConfiguración global:")
@@ -159,17 +144,20 @@ def main():
 
     if not CORRER_C2 and (CORRER_C3 or CORRER_SEG):
         print("AVISO: CORRER_C2=False — C3 y segmentación no tendrán")
-        print("  diffs encadenados para frames sin GT.")
-        print("  Usarán el último diff real disponible como alternativa.")
+        print("  diffs encadenados NI C2_prep predicho para frames sin GT.")
+        print("  Usarán el último C2 real disponible como alternativa.")
+        print()
+    if not CORRER_C3 and CORRER_SEG:
+        print("AVISO: CORRER_C3=False — segmentación no tendrá")
+        print("  C3_prep predicho para frames sin GT.")
+        print("  Usará el último C3 real disponible como alternativa.")
         print()
 
-    # Orden fijo: C2 → C3 → Seg
     pipeline = [
         ('Regresion_C2',  SCRIPT_C2,  CORRER_C2),
         ('Regresion_C3',  SCRIPT_C3,  CORRER_C3),
         ('Segmentacion',  SCRIPT_SEG, CORRER_SEG),
     ]
-
     resumen  = []
     t_total  = time.time()
 
@@ -178,7 +166,6 @@ def main():
             print(f"  [{nombre}] Omitido (desactivado)")
             resumen.append((nombre, 'omitido'))
             continue
-
         ok = correr_inferencia(nombre, script_path)
         resumen.append((nombre, 'ok' if ok else 'ERROR'))
 
@@ -190,7 +177,6 @@ def main():
         icono = '✓' if estado == 'ok' else ('—' if estado == 'omitido' else '✗')
         print(f"  [{icono}] {nombre:<20} : {estado}")
 
-    # Mostrar carpetas de salida
     print(f"\nCarpetas de resultados:")
     carpetas = [
         BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones',

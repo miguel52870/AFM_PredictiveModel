@@ -19,11 +19,11 @@ Genera en resultados/modelo_regresion_C2/predicciones/:
 
 Carpetas de NPY y PNG guardados:
   predicciones/npy/pred/      ← C2 predicho (con y sin GT)
-  predicciones/npy/real/      ← C2 real (solo con GT)
+  predicciones/npy/pred_con_gt/ ← C2 real/GT (solo con GT)
   predicciones/npy/error/     ← |pred - real| (solo con GT)
   predicciones/npy/diff_pred/ ← diff encadenado sin GT (para seg y C3)
   predicciones/png/pred/
-  predicciones/png/real/
+  predicciones/png/pred_con_gt/
   predicciones/png/error/
   predicciones/png/diff_pred/
 """
@@ -56,13 +56,15 @@ OUTPUT_DIR   = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones'
 
 # Subcarpetas de salida
 NPY_PRED      = OUTPUT_DIR / 'npy' / 'pred'
-NPY_REAL      = OUTPUT_DIR / 'npy' / 'real'
+NPY_REAL      = OUTPUT_DIR / 'npy' / 'pred_con_gt'
 NPY_ERROR     = OUTPUT_DIR / 'npy' / 'error'
 NPY_DIFF_PRED = OUTPUT_DIR / 'npy' / 'diff_pred'
+NPY_PRED_C2   = OUTPUT_DIR / 'npy' / 'pred_c2'   # C2 predicho para C3 y Seg
 PNG_PRED      = OUTPUT_DIR / 'png' / 'pred'
-PNG_REAL      = OUTPUT_DIR / 'png' / 'real'
+PNG_REAL      = OUTPUT_DIR / 'png' / 'pred_con_gt'
 PNG_ERROR     = OUTPUT_DIR / 'png' / 'error'
 PNG_DIFF_PRED = OUTPUT_DIR / 'png' / 'diff_pred'
+PNG_PRED_C2   = OUTPUT_DIR / 'png' / 'pred_c2'
 FIG_DIR       = OUTPUT_DIR / 'figuras'
 
 # --- MODO DE RECORTE ---
@@ -209,7 +211,7 @@ def run_independiente(model, device, positions):
         # Guardar NPY y PNG
         stem = f"frame_{pos+1:03d}_indep"
         save_frame_files(pred,                         stem + '_pred',  NPY_PRED,  PNG_PRED,  'RdBu_r')
-        save_frame_files(c2_real,                      stem + '_real',  NPY_REAL,  PNG_REAL,  'RdBu_r')
+        save_frame_files(c2_real,                      stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'RdBu_r')
         save_frame_files(np.abs(pred - c2_real),       stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -254,7 +256,7 @@ def run_autoregresiva(model, device, positions):
         # Guardar NPY y PNG
         stem = f"frame_{pos+1:03d}_auto"
         save_frame_files(pred,                   stem + '_pred',  NPY_PRED,  PNG_PRED,  'RdBu_r')
-        save_frame_files(c2_real,                stem + '_real',  NPY_REAL,  PNG_REAL,  'RdBu_r')
+        save_frame_files(c2_real,                stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'RdBu_r')
         save_frame_files(np.abs(pred - c2_real), stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -325,10 +327,21 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
 
         print(f"  Frame {pos+1:>3} (paso {i+1:>2}) | C2: {fuente} | diff: {diff_fuente}")
 
-        # Guardar NPY y PNG — pred y diff encadenado
+        # Guardar NPY y PNG — pred, diff encadenado y error vs. pred anterior
         stem = f"frame_{pos+1:03d}_sin_gt"
         save_frame_files(pred,    stem + '_pred',      NPY_PRED,      PNG_PRED,      'RdBu_r')
         save_frame_files(c2_diff, stem + '_diff_pred', NPY_DIFF_PRED, PNG_DIFF_PRED, 'hot')
+        save_frame_files(pred,    stem + '_pred_c2',   NPY_PRED_C2,   PNG_PRED_C2,   'RdBu_r')
+
+        # Error sin GT: |pred_actual - pred_anterior|
+        # Para paso 0: prev_pred es None → comparar contra último real disponible
+        if prev_pred is not None:
+            ref_error = prev_pred
+        else:
+            ref_pos   = min(pos, n_c2)
+            ref_error = load_npy(get_file(idx_c2_prep, ref_pos))
+        error_sgt = np.abs(pred - ref_error).astype(np.float32)
+        save_frame_files(error_sgt, stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
             'pos_in': pos, 'pos_out': pos + 1, 'paso': i + 1,
@@ -509,51 +522,34 @@ def plot_sin_gt(results, out_dir):
         plt.savefig(str(fname), dpi=150, bbox_inches='tight')
         plt.close()
 
-    # PNG resumen — 4 filas: pred / pred anterior / |pred-anterior| / |pred-ultimo real|
+    # PNG resumen
     n = len(results)
     ncols = n + 1
-    fig, axes = plt.subplots(4, ncols, figsize=(4*ncols, 16))
+    fig, axes = plt.subplots(3, ncols, figsize=(4*ncols, 12))
     fig.suptitle(
         f"C2 encadenado sin GT  frames {results[0]['pos_out']}–{results[-1]['pos_out']}\n"
         f"Col 0 = {lbl_ultimo}  |  Col 1..N = predicciones encadenadas",
         fontsize=10, fontweight='bold')
-
     axes[0, 0].imshow(ultimo_real, cmap='RdBu_r', vmin=0, vmax=1)
     axes[0, 0].set_title(lbl_ultimo, fontsize=8)
     axes[0, 0].axis('off')
     axes[1, 0].axis('off')
     axes[2, 0].axis('off')
-    axes[3, 0].axis('off')
-
     for i, r in enumerate(results):
-        pred_a  = results[i-1]['pred'] if i > 0 else ultimo_real
-        label_a = f"Frame {results[i-1]['pos_out']} pred." if i > 0 else lbl_ultimo
-
-        # Fila 0 — predicción actual
+        pred_a = results[i-1]['pred'] if i > 0 else ultimo_real
         axes[0, i+1].imshow(r['pred'], cmap='RdBu_r', vmin=0, vmax=1)
         axes[0, i+1].set_title(f"Frame {r['pos_out']}\nPaso {r['paso']}", fontsize=8)
         axes[0, i+1].axis('off')
-
-        # Fila 1 — predicción anterior (o último real para paso 1)
-        axes[1, i+1].imshow(pred_a, cmap='RdBu_r', vmin=0, vmax=1)
-        axes[1, i+1].set_title(label_a, fontsize=8)
+        axes[1, i+1].imshow(np.abs(r['pred']-ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
+        axes[1, i+1].set_title('|Pred − Último real|', fontsize=7)
         axes[1, i+1].axis('off')
-
-        # Fila 2 — error entre pred actual y pred anterior
-        axes[2, i+1].imshow(np.abs(r['pred'] - pred_a), cmap='Reds', vmin=0, vmax=0.5)
+        axes[2, i+1].imshow(np.abs(r['pred']-pred_a), cmap='Reds', vmin=0, vmax=0.5)
         axes[2, i+1].set_title('|Pred − Anterior|', fontsize=7)
         axes[2, i+1].axis('off')
-
-        # Fila 3 — deriva acumulada respecto al último real conocido
-        axes[3, i+1].imshow(np.abs(r['pred'] - ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
-        axes[3, i+1].set_title('|Pred − Último real|', fontsize=7)
-        axes[3, i+1].axis('off')
-
     for row_i, (lab, col) in enumerate([
-        ('C2 predicho',        '#534AB7'),
-        ('Pred. anterior',     '#185FA5'),
-        ('vs. Pred. anterior', '#1D9E75'),
-        ('vs. Último real',    '#D85A30'),
+        ('C2 predicho',       '#534AB7'),
+        ('vs. Último real',   '#D85A30'),
+        ('vs. Pred. anterior','#444441'),
     ]):
         axes[row_i, 0].set_ylabel(lab, fontsize=9, fontweight='bold', color=col)
     plt.tight_layout()
@@ -585,7 +581,8 @@ def save_metrics_csv(results, out_dir, filename):
 def main():
     # Crear todas las carpetas de salida
     for d in [OUTPUT_DIR, NPY_PRED, NPY_REAL, NPY_ERROR, NPY_DIFF_PRED,
-              PNG_PRED, PNG_REAL, PNG_ERROR, PNG_DIFF_PRED, FIG_DIR]:
+              NPY_PRED_C2, PNG_PRED, PNG_REAL, PNG_ERROR, PNG_DIFF_PRED,
+              PNG_PRED_C2, FIG_DIR]:
         os.makedirs(d, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -650,7 +647,7 @@ def main():
             plot_sin_gt(res_p, OUTPUT_DIR)
 
     print(f"\nResultados en: {OUTPUT_DIR}")
-    print(f"NPY pred    : {NPY_PRED}")
+    print(f"NPY pred        : {NPY_PRED}")
     print(f"NPY diff    : {NPY_DIFF_PRED}  ← usar en seg y C3 para frames sin GT")
 
 if __name__ == '__main__':
