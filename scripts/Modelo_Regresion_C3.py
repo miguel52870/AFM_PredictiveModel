@@ -45,8 +45,11 @@ LOG_CSV      = OUTPUT_DIR / 'training_log.csv'
 # Posición 1 = primer archivo, posición 2 = segundo, etc.
 #
 # Par válido: input en posición N, target C3_prep en posición N+1
-# Con 40 archivos → 39 pares posibles
-# Split: posiciones 1-33 train (33 pares), 34-39 val (6 pares)
+# El diff del frame N está en idx_c2_diff[N-1]: la carpeta diff/ tiene 39
+# archivos (frames 2..40) porque el frame 1 no tiene frame anterior, mientras
+# canal_2/ y canal_3/ tienen 40. Por eso la posición 1 no puede ser input.
+# Con 40 archivos → 38 pares posibles (posiciones 2..39)
+# Split: posiciones 2-33 train (32 pares), 34-39 val (6 pares)
 # Posición 40 solo se usa como target del par 39
 #
 TOTAL_FILES  = 40
@@ -137,7 +140,7 @@ class RegressionDataset(Dataset):
     """
     Par (posición_N, posición_N+1):
       Input  → [C2_prep_N, C2_diff_N, C3_prep_N]  tensor (3, 80, 80) float32
-      Target → C2_prep_{N+1}                        tensor (1, 80, 80) float32 [0,1]
+      Target → C3_prep_{N+1}                        tensor (1, 80, 80) float32 [0,1]
 
     Augmentation (solo train):
       - Flip horizontal y vertical aleatorio
@@ -185,7 +188,11 @@ class RegressionDataset(Dataset):
         pos = self.positions[idx]
 
         c2_prep = self._load_npy(get_file(idx_c2_prep, pos))
-        c2_diff = self._load_npy(get_file(idx_c2_diff, pos))
+        # El diff del frame N esta en la posicion N-1: diff/ arranca un frame
+        # despues que canal_2/ porque el primer frame no tiene frame anterior.
+        # Usar 'pos' aqui cargaria |C2[N+1] - C2[N]|, informacion del frame
+        # target — fuga de informacion.
+        c2_diff = self._load_npy(get_file(idx_c2_diff, pos - 1))
         c3_prep = self._load_npy(get_file(idx_c3_prep, pos))
 
         # Target: C3_prep del frame siguiente (fase PFM continua)
@@ -343,20 +350,22 @@ def main():
     print(f"Archivos C3_prep : {n_c3}")
 
     # Pares válidos: posición N como input, N+1 como target
-    # Con 40 archivos → posiciones 1-39 como input (39 pares)
-    all_positions  = list(range(1, n_c2))        # 1..39
-    train_positions = all_positions[:-VAL_FRAMES] # 1..33
+    # El diff del frame N está en idx_c2_diff[N-1], por lo que la posición 1
+    # no tiene diff previo y queda excluida.
+    # Con 40 archivos → posiciones 2-39 como input (38 pares)
+    all_positions  = list(range(2, n_c2))        # 2..39
+    train_positions = all_positions[:-VAL_FRAMES] # 2..33
     val_positions   = all_positions[-VAL_FRAMES:] # 34..39
 
     crop_label = f"{CROP_W}px" if CROP_MODE == "cuadrado" else f"{CROP_W}x{CROP_H}px"
     print(f"Modo recorte  : {CROP_MODE} ({crop_label})")
     print(f"\nPares totales : {len(all_positions)}")
     print(f"\nTrain : {len(train_positions)} pares")
-    print(f"  Posición {train_positions[0]:>3} → archivo: {get_file(idx_c2_diff, train_positions[0]).stem}")
-    print(f"  Posición {train_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, train_positions[-1]).stem}")
+    print(f"  Posición {train_positions[0]:>3} → archivo: {get_file(idx_c2_diff, train_positions[0] - 1).stem}")
+    print(f"  Posición {train_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, train_positions[-1] - 1).stem}")
     print(f"Val   : {len(val_positions)} pares")
-    print(f"  Posición {val_positions[0]:>3} → archivo: {get_file(idx_c2_diff, val_positions[0]).stem}")
-    print(f"  Posición {val_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, val_positions[-1]).stem}\n")
+    print(f"  Posición {val_positions[0]:>3} → archivo: {get_file(idx_c2_diff, val_positions[0] - 1).stem}")
+    print(f"  Posición {val_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, val_positions[-1] - 1).stem}\n")
 
     # --- DataLoaders ---
     train_loader = DataLoader(

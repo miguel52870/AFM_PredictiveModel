@@ -7,15 +7,12 @@ Modos disponibles (INFERENCE_MODE):
   'autoregresiva'  → usa la máscara predicha del frame anterior como input
   'ambos'          → corre ambos modos y genera comparación lado a lado
 
-Fila de segmentación — 8 paneles:
-  1. Probabilidad predicha   (continua 0–1, RdBu_r)
-  2. Binaria predicha        (umbral 0.5, gray)
-  3. Máscara real            (Otsu binaria, gray)
-  4. C3_prep real            (fase continua, twilight)
-  5. C3_prep input           (fase usada como input, twilight)
-  6. —                       (espacio reservado para etiqueta)
-  7. |Pred - Máscara|        (error vs. ground truth binario, Reds)
-  8. |Pred - C3_prep|        (error vs. fase continua, Reds)
+Paneles por frame (3 filas x 4 columnas):
+  Fila 0 — Inputs:      C2 prep | C2 diff | C3 prep (fase continua)
+  Fila 1 — Resultados:  Binaria predicha | Mascara Otsu real |
+                        C3_prep real | Probabilidad (salida continua)
+  Fila 2 — Errores:     |Binaria - Mascara| (error duro) |
+                        |Probabilidad - Mascara| (error pesado por confianza)
 
 Genera en resultados/modelo_segmentacion/predicciones/:
   - PNG por frame con 8 paneles
@@ -57,6 +54,8 @@ DIR_DIFF_PRED = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones'
 DIR_PRED_C2   = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'pred_c2'
 # C3 predicho de regresion_C3 (para usar como C3_prep en frames sin GT)
 DIR_PRED_C3   = BASE_DIR / 'resultados' / 'modelo_regresion_c3' / 'predicciones' / 'npy' / 'pred'
+# Predicciones autoregresivas de C2 (frame_NNN_auto_pred.npy)
+DIR_C2_PRED   = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'pred'
 
 # Subcarpetas de salida
 NPY_PRED  = OUTPUT_DIR / 'npy' / 'pred'
@@ -115,6 +114,8 @@ idx_diff_pred = build_file_index(DIR_DIFF_PRED) if DIR_DIFF_PRED.exists() else [
 # Indices de C2 y C3 predichos
 idx_pred_c2   = build_file_index(DIR_PRED_C2)   if DIR_PRED_C2.exists()   else []
 idx_pred_c3   = build_file_index(DIR_PRED_C3)   if DIR_PRED_C3.exists()   else []
+# Indice de predicciones autoregresivas de C2
+idx_c2_pred   = build_file_index(DIR_C2_PRED)   if DIR_C2_PRED.exists()   else []
 
 # =================================================================
 # 3. UTILIDADES
@@ -150,10 +151,10 @@ def compute_metrics(pred_bin, mask_real, eps=1e-6):
     acc   = float((pred_bin == mask_real).mean())
     return {'iou': iou, 'dice': dice, 'acc': acc}
 
-def save_array_png(arr, path_png, cmap='gray', vmin=0, vmax=1):
+def save_array_png(arr, path_png, cmap='gray_r', vmin=0, vmax=1):
     plt.imsave(str(path_png), arr, cmap=cmap, vmin=vmin, vmax=vmax)
 
-def save_frame_files(arr, stem, npy_dir, png_dir, cmap='gray'):
+def save_frame_files(arr, stem, npy_dir, png_dir, cmap='gray_r'):
     np.save(str(npy_dir / (stem + '.npy')), arr)
     save_array_png(arr, png_dir / (stem + '.png'), cmap=cmap)
 
@@ -176,16 +177,53 @@ def load_pred_c2(frame_out):
             return arr
     return None
 
-def load_pred_c3(frame_out):
-    """Carga C3 predicho del frame indicado generado por inferencia_regresion_C3."""
-    for pat in [f'frame_{frame_out:03d}_sin_gt_pred.npy',
-                f'frame_{frame_out:03d}_indep_pred.npy']:
-        for f in idx_pred_c3:
-            if f.name == pat:
-                arr = np.load(str(f)).astype(np.float32)
-                mn, mx = arr.min(), arr.max()
-                if mx - mn > 1e-8: arr = (arr - mn) / (mx - mn)
-                return arr
+def load_pred_c3(frame):
+    """C3 predicho por inferencia_regresion_C3 en modo sin GT.
+
+    Solo busca archivos '_sin_gt_pred': el fallback a '_indep_pred' haria
+    que el paso 0 tomara una prediccion en vez del C3 real disponible.
+    None si no existe.
+    """
+    stem_buscado = f"frame_{frame:03d}_sin_gt_pred"
+    for f in idx_pred_c3:
+        if f.stem == stem_buscado:
+            arr = np.load(str(f)).astype(np.float32)
+            mn, mx = arr.min(), arr.max()
+            if mx - mn > 1e-8: arr = (arr - mn) / (mx - mn)
+            return arr
+    return None
+
+def _load_norm(path):
+    arr = np.load(str(path)).astype(np.float32)
+    mn, mx = arr.min(), arr.max()
+    if mx - mn > 1e-8: arr = (arr - mn) / (mx - mn)
+    return arr
+
+def load_auto_pred_c2(frame):
+    """C2 predicho en modo autoregresivo. C2 nombra su prediccion por el
+    frame que contiene, asi que la clave es el frame de input."""
+    stem_buscado = f"frame_{frame:03d}_auto_pred"
+    for f in idx_c2_pred:
+        if f.stem == stem_buscado:
+            return _load_norm(f)
+    return None
+
+def load_auto_diff_c2(frame_in):
+    """Diff encadenado que C2 uso como input en el frame indicado.
+    C2 lo guarda bajo el stem del frame TARGET, de ahi el frame_in + 1."""
+    stem_buscado = f"frame_{frame_in + 1:03d}_auto_diff"
+    for f in idx_diff_pred:
+        if f.stem == stem_buscado:
+            return np.load(str(f)).astype(np.float32)
+    return None
+
+def load_auto_pred_c3(frame):
+    """C3 predicho en modo autoregresivo por inferencia_regresion_C3.
+    Fase continua — mismo dominio que el canal C3_prep del entrenamiento."""
+    stem_buscado = f"frame_{frame:03d}_auto_pred"
+    for f in idx_pred_c3:
+        if f.stem == stem_buscado:
+            return _load_norm(f)
     return None
 
 # =================================================================
@@ -214,7 +252,9 @@ def run_independiente(model, device, positions):
     results = []
     for pos in positions:
         c2_prep    = load_npy(get_file(idx_c2_prep, pos))
-        c2_diff    = load_npy(get_file(idx_c2_diff, pos))
+        # El diff del frame N esta en la posicion N-1. Usar 'pos' cargaria
+        # |C2[N+1] - C2[N]|, el cambio hacia el target — fuga.
+        c2_diff    = load_npy(get_file(idx_c2_diff, pos - 1))
         c3_prep    = load_npy(get_file(idx_c3_prep, pos))
         mask_real  = load_mask(get_file(idx_c3_mask, pos + 1))
         c3_prep_real = load_npy(get_file(idx_c3_prep, pos + 1))
@@ -230,8 +270,8 @@ def run_independiente(model, device, positions):
 
         # Guardar NPY y PNG
         stem = f"frame_{pos+1:03d}_indep"
-        save_frame_files(binary,                      stem + '_pred',  NPY_PRED,  PNG_PRED,  'gray')
-        save_frame_files(mask_real,                   stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'gray')
+        save_frame_files(binary,                      stem + '_pred',  NPY_PRED,  PNG_PRED,  'gray_r')
+        save_frame_files(mask_real,                   stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'gray_r')
         save_frame_files(np.abs(binary - mask_real),  stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -248,22 +288,47 @@ def run_independiente(model, device, positions):
 
 def run_autoregresiva(model, device, positions):
     print("─" * 65)
-    print("MODO: Autoregresiva")
+    print("MODO: Autoregresiva (los 3 canales vienen del pipeline)")
+    if idx_c2_pred and idx_pred_c3:
+        print("  C2 y diff de inferencia_regresion_C2.py, C3 de inferencia_regresion_C3.py")
+    else:
+        print("  AVISO: faltan predicciones autoregresivas de C2 y/o C3.")
+        print("  Los canales que falten caeran a datos REALES y la degradacion")
+        print("  medida quedara subestimada. Correr C2 y C3 antes que este script.")
     print("─" * 65)
     results   = []
     prev_pred = None
     for i, pos in enumerate(positions):
-        c2_prep      = load_npy(get_file(idx_c2_prep, pos))
-        c2_diff      = load_npy(get_file(idx_c2_diff, pos))
         mask_real    = load_mask(get_file(idx_c3_mask, pos + 1))
         c3_prep_real = load_npy(get_file(idx_c3_prep, pos + 1))
 
-        if i == 0 or prev_pred is None:
+        # Paso 0: los 3 canales reales — unico punto de arranque medido.
+        # Pasos 1+: los 3 canales provienen del pipeline C2 -> C3 -> Seg.
+        # El slot C3_prep lleva FASE CONTINUA (predicha por RC3), no la
+        # mascara binaria: es el dominio con el que se entreno el modelo.
+        if i == 0:
+            c2_prep  = load_npy(get_file(idx_c2_prep, pos))
+            c2_diff  = load_npy(get_file(idx_c2_diff, pos - 1))
             c3_input = load_npy(get_file(idx_c3_prep, pos))
-            fuente   = 'real'
+            c2_src, diff_src, fuente = 'real', 'real', 'real'
         else:
-            c3_input = prev_pred
-            fuente   = 'predicha'
+            c2_auto = load_auto_pred_c2(pos)
+            if c2_auto is not None:
+                c2_prep, c2_src = c2_auto, 'C2 auto'
+            else:
+                c2_prep, c2_src = load_npy(get_file(idx_c2_prep, pos)), 'real (fallback)'
+
+            d_auto = load_auto_diff_c2(pos)
+            if d_auto is not None:
+                c2_diff, diff_src = d_auto, 'encadenado C2'
+            else:
+                c2_diff, diff_src = load_npy(get_file(idx_c2_diff, pos - 1)), 'real (fallback)'
+
+            c3_auto = load_auto_pred_c3(pos)
+            if c3_auto is not None:
+                c3_input, fuente = c3_auto, 'C3 auto'
+            else:
+                c3_input, fuente = load_npy(get_file(idx_c3_prep, pos)), 'real (fallback)'
 
         tensor       = build_input_tensor(c2_prep, c2_diff, c3_input, device)
         prob, binary = predict(model, tensor)
@@ -272,12 +337,13 @@ def run_autoregresiva(model, device, positions):
         fname_in  = get_file(idx_c2_prep, pos).stem
         fname_out = get_file(idx_c3_mask, pos + 1).stem
         print(f"  Pos {pos:>3} → {pos+1:>3} | IoU={metrics['iou']:.4f} "
-              f"Dice={metrics['dice']:.4f} Acc={metrics['acc']:.4f} [C3: {fuente}]")
+              f"Dice={metrics['dice']:.4f} Acc={metrics['acc']:.4f} "
+              f"[C2: {c2_src} | diff: {diff_src} | C3: {fuente}]")
 
         # Guardar NPY y PNG
         stem = f"frame_{pos+1:03d}_auto"
-        save_frame_files(binary,                      stem + '_pred',  NPY_PRED,  PNG_PRED,  'gray')
-        save_frame_files(mask_real,                   stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'gray')
+        save_frame_files(binary,                      stem + '_pred',  NPY_PRED,  PNG_PRED,  'gray_r')
+        save_frame_files(mask_real,                   stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'gray_r')
         save_frame_files(np.abs(binary - mask_real),  stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
 
         results.append({
@@ -290,6 +356,8 @@ def run_autoregresiva(model, device, positions):
             'c3_prep_real': c3_prep_real,
             'metrics': metrics, 'modo': 'autoregresiva',
             'c3_fuente': fuente,
+            'c2_fuente': c2_src,
+            'diff_fuente': diff_src,
         })
         prev_pred = binary
     return results
@@ -319,42 +387,41 @@ def run_sin_gt(model, device, positions, n_c2, n_mask, modo):
     prev_pred = None   # máscara binaria predicha en el paso anterior
 
     for i, pos in enumerate(positions):
-        # C2_prep: usar C2 predicho si existe, sino último real
-        c2_pred = load_pred_c2(pos + 1)
+        # C2_prep: el slot lleva el frame de INPUT (pos), no el target.
+        # En el paso 0 no hay prediccion todavia -> cae al ultimo real,
+        # que es justamente el input correcto.
+        c2_pred = load_pred_c2(pos)
         if c2_pred is not None:
             c2_prep = c2_pred
-            c2p_src = f'C2 predicho frame {pos+1}'
+            c2p_src = f'C2 predicho frame {pos}'
         else:
             c2_pos  = min(pos, n_c2)
             c2_prep = load_npy(get_file(idx_c2_prep, c2_pos))
             c2p_src = f'C2 real (pos {c2_pos})'
 
-        # C2_diff: diff encadenado de C2 si existe, sino último real
+        # C2_diff: C2 lo guarda bajo el stem del frame target aunque el
+        # contenido corresponda al frame de input, de ahi la clave pos+1.
         diff_pred = load_diff_pred(pos + 1)
         if diff_pred is not None:
             c2_diff     = diff_pred
-            diff_fuente = f'encadenado C2 frame {pos+1}'
+            diff_fuente = f'encadenado C2 (input frame {pos})'
         else:
-            diff_pos    = min(pos, len(idx_c2_diff))
+            diff_pos    = min(pos - 1, len(idx_c2_diff))
             c2_diff     = (load_npy(get_file(idx_c2_diff, diff_pos))
                            if diff_pos >= 1
                            else np.zeros((CROP_H, CROP_W), dtype=np.float32))
             diff_fuente = f'real (pos {diff_pos})'
 
-        # C3 input: paso 0 = C3 predicho de RC3 si existe, sino último real
-        #           pasos siguientes = máscara predicha por este modelo
-        if i == 0:
-            c3_rc3 = load_pred_c3(pos + 1)
-            if c3_rc3 is not None:
-                c3_input = c3_rc3
-                fuente   = f'C3 predicho RC3 frame {pos+1}'
-            else:
-                c3_pos   = min(pos, len(idx_c3_prep))
-                c3_input = load_npy(get_file(idx_c3_prep, c3_pos))
-                fuente   = f'C3 real (pos {c3_pos})'
+        # C3_prep: fase continua predicha por RC3 — mismo dominio del
+        # entrenamiento. No se encadena la mascara binaria propia.
+        c3_rc3 = load_pred_c3(pos)
+        if c3_rc3 is not None:
+            c3_input = c3_rc3
+            fuente   = f'C3 predicho RC3 frame {pos}'
         else:
-            c3_input = prev_pred.astype(np.float32)
-            fuente   = f'máscara predicha frame {pos}'
+            c3_pos   = min(pos, len(idx_c3_prep))
+            c3_input = load_npy(get_file(idx_c3_prep, c3_pos))
+            fuente   = f'C3 real (pos {c3_pos})'
 
         tensor       = build_input_tensor(c2_prep, c2_diff, c3_input, device)
         prob, binary = predict(model, tensor)
@@ -363,7 +430,7 @@ def run_sin_gt(model, device, positions, n_c2, n_mask, modo):
 
         # Guardar NPY y PNG — prediccion y error vs. pred anterior
         stem = f"frame_{pos+1:03d}_sin_gt"
-        save_frame_files(binary, stem + '_pred', NPY_PRED, PNG_PRED, 'gray')
+        save_frame_files(binary, stem + '_pred', NPY_PRED, PNG_PRED, 'gray_r')
 
         # Error sin GT: |pred_actual - pred_anterior|
         # Para paso 0: prev_pred es None → comparar contra último real disponible
@@ -404,11 +471,11 @@ def plot_results(results, out_dir, suffix=''):
 
     for r in results:
         # C3 input: frame real (twilight) o mascara predicha (gray) en autoregresivo
-        c3_input_es_real = r.get('c3_fuente', 'real') == 'real'
-        c3_input_cmap    = 'twilight' if c3_input_es_real else 'gray'
-        c3_input_titulo  = ('C3 input\n(frame ' + str(r['pos_in']) + ' real)'
-                            if c3_input_es_real
-                            else 'C3 input\n(mascara pred. frame ' + str(r['pos_in']) + ')')
+        # C3 input: siempre fase continua (real o predicha por RC3),
+        # nunca una mascara binaria — de ahi el colormap fijo.
+        c3_src           = r.get('c3_fuente', 'real')
+        c3_input_cmap    = 'twilight'
+        c3_input_titulo  = ('C3 input\n(frame ' + str(r['pos_in']) + ' ' + c3_src + ')')
 
         fig, axes = plt.subplots(3, 4, figsize=(16, 12))
         fig.suptitle(
@@ -438,8 +505,8 @@ def plot_results(results, out_dir, suffix=''):
 
         # ── Fila 1 — Prediccion vs. Real ─────────────────────────────
         fila1 = [
-            (r['binary'],                          'Prediccion\n(binaria, umbral 0.5)', 'gray',     0, 1),
-            (r['mask_real'],                       'Real\n(mascara Otsu)',              'gray',     0, 1),
+            (r['binary'],                          'Prediccion\n(binaria, umbral 0.5)', 'gray_r',     0, 1),
+            (r['mask_real'],                       'Real\n(mascara Otsu)',              'gray_r',     0, 1),
             (r['c3_prep_real'],                    'C3_prep real\n(fase continua, frame ' + str(r['pos_out']) + ')', 'twilight', 0, 1),
             (r['prob'],                            'Probabilidad\n(salida continua)',   'RdBu_r',   0, 1),
         ]
@@ -451,10 +518,15 @@ def plot_results(results, out_dir, suffix=''):
             plt.colorbar(im, ax=axes[1, col], fraction=0.046, pad=0.04)
         axes[1, 0].set_ylabel('Prediccion vs. Real', fontsize=9, fontweight='bold', color='#378ADD')
 
-        # ── Fila 2 — Error vs. fase continua ─────────────────────────
+        # ── Fila 2 — Error duro vs. error suave ──────────────────────
+        # Ambos contra el MISMO ground truth (mascara Otsu):
+        #   binaria vs mascara  -> donde se equivoco tras umbralizar
+        #   prob    vs mascara  -> lo mismo pesado por la confianza;
+        #                          revela si el error viene de dudas en las
+        #                          paredes de dominio o de fallos seguros.
         fila2 = [
-            (np.abs(r['binary'] - r['mask_real']),    '|Pred − Real|\n(error binario)',               'Reds', 0, 1),
-            (np.abs(r['binary'] - r['c3_prep_real']), '|Pred − C3_prep real|\n(error vs. fase)',      'Reds', 0, 1),
+            (np.abs(r['binary'] - r['mask_real']), '|Pred − Real|\n(error binario)',              'Reds', 0, 1),
+            (np.abs(r['prob']   - r['mask_real']), '|Prob − Real|\n(error continuo, confianza)',  'Reds', 0, 1),
         ]
         for col, (data, title, cmap, vmin, vmax) in enumerate(fila2):
             im = axes[2, col].imshow(data, cmap=cmap, vmin=vmin, vmax=vmax,
@@ -478,11 +550,11 @@ def plot_results(results, out_dir, suffix=''):
     fig.suptitle(f"Resumen — [{results[0]['modo']}]", fontsize=13)
 
     for i, r in enumerate(results):
-        axes[0, i].imshow(r['binary'],      cmap='gray')
+        axes[0, i].imshow(r['binary'],      cmap='gray_r')
         axes[0, i].set_title(f"Pred binaria\npos {r['pos_out']}\n"
                               f"IoU={r['metrics']['iou']:.3f}", fontsize=8)
         axes[0, i].axis('off')
-        axes[1, i].imshow(r['mask_real'],   cmap='gray')
+        axes[1, i].imshow(r['mask_real'],   cmap='gray_r')
         axes[1, i].set_title(f"Máscara real\npos {r['pos_out']}", fontsize=8)
         axes[1, i].axis('off')
         axes[2, i].imshow(r['c3_prep_real'], cmap='twilight')
@@ -507,13 +579,13 @@ def plot_comparacion(res_i, res_a, out_dir):
         axes[row, 0].set_ylabel(label, fontsize=10, rotation=90, labelpad=10)
 
     for col, (ri, ra) in enumerate(zip(res_i, res_a)):
-        axes[0, col].imshow(ri['binary'],      cmap='gray')
+        axes[0, col].imshow(ri['binary'],      cmap='gray_r')
         axes[0, col].set_title(f"Pos {ri['pos_out']}\nIoU={ri['metrics']['iou']:.3f}",
                                fontsize=8)
-        axes[1, col].imshow(ra['binary'],      cmap='gray')
+        axes[1, col].imshow(ra['binary'],      cmap='gray_r')
         axes[1, col].set_title(f"Pos {ra['pos_out']}\nIoU={ra['metrics']['iou']:.3f}",
                                fontsize=8)
-        axes[2, col].imshow(ri['mask_real'],   cmap='gray')
+        axes[2, col].imshow(ri['mask_real'],   cmap='gray_r')
         axes[2, col].set_title(f"Pos {ri['pos_out']}", fontsize=8)
         axes[3, col].imshow(ri['c3_prep_real'], cmap='twilight')
         axes[3, col].set_title(f"Pos {ri['pos_out']}", fontsize=8)
@@ -557,7 +629,7 @@ def plot_sin_gt(results, out_dir):
         row0 = [
             (r['c2_prep'], 'C2 input',       'RdBu_r'),
             (r['c2_diff'], 'C2 diff',        'hot'),
-            (pred_val,     'Seg predicha',   'gray'),
+            (pred_val,     'Seg predicha',   'gray_r'),
         ]
         for col, (data, title, cmap) in enumerate(row0):
             im = axes[0, col].imshow(data, cmap=cmap, vmin=0, vmax=1, interpolation='nearest')
@@ -568,8 +640,8 @@ def plot_sin_gt(results, out_dir):
 
         # Fila 1 — Pred actual vs. ultimo real (etiqueta siempre fija)
         row1 = [
-            (pred_val,                       'Seg predicha',       'gray'),
-            (ultimo_real,                     lbl_ultimo,           'gray'),
+            (pred_val,                       'Seg predicha',       'gray_r'),
+            (ultimo_real,                     lbl_ultimo,           'gray_r'),
             (np.abs(pred_val - ultimo_real), '|Pred - Ultimo real|','Reds'),
         ]
         for col, (data, title, cmap) in enumerate(row1):
@@ -582,8 +654,8 @@ def plot_sin_gt(results, out_dir):
 
         # Fila 2 — Pred actual vs. pred anterior
         row2 = [
-            (pred_val,                      'Prediccion actual',   'gray'),
-            (pred_ant,                       label_ant,            'gray'),
+            (pred_val,                      'Prediccion actual',   'gray_r'),
+            (pred_ant,                       label_ant,            'gray_r'),
             (np.abs(pred_val - pred_ant),   '|Actual - Anterior|', 'Reds'),
         ]
         for col, (data, title, cmap) in enumerate(row2):
@@ -609,7 +681,7 @@ def plot_sin_gt(results, out_dir):
                   "  |  Col 0 = " + lbl_ultimo + "  Col 1..N = predicciones")
     fig.suptitle(titulo_res, fontsize=10, fontweight='bold')
 
-    axes[0, 0].imshow(ultimo_real, cmap='gray', vmin=0, vmax=1)
+    axes[0, 0].imshow(ultimo_real, cmap='gray_r', vmin=0, vmax=1)
     axes[0, 0].set_title(lbl_ultimo, fontsize=8)
     axes[0, 0].axis('off')
     axes[1, 0].axis('off')
@@ -619,7 +691,7 @@ def plot_sin_gt(results, out_dir):
         pred_val = r['binary']
         pred_a   = results[i-1]['binary'] if i > 0 else ultimo_real
 
-        axes[0, i+1].imshow(pred_val, cmap='gray', vmin=0, vmax=1)
+        axes[0, i+1].imshow(pred_val, cmap='gray_r', vmin=0, vmax=1)
         axes[0, i+1].set_title("Frame " + str(r['pos_out']) + " paso " + str(r['paso']), fontsize=8)
         axes[0, i+1].axis('off')
         axes[1, i+1].imshow(np.abs(pred_val - ultimo_real), cmap='Reds', vmin=0, vmax=0.5)
@@ -667,9 +739,11 @@ def print_mapeo(positions):
     print("─" * 65)
     for pos in positions:
         f_in  = get_file(idx_c2_prep, pos).stem
+        f_dif = get_file(idx_c2_diff, pos - 1).stem
         f_msk = get_file(idx_c3_mask, pos + 1).stem
         f_c3  = get_file(idx_c3_prep, pos + 1).stem
         print(f"  {pos:>4}  input        {f_in}")
+        print(f"  {pos-1:>4}  diff         {f_dif}")
         print(f"  {pos+1:>4}  mask target  {f_msk}")
         print(f"  {pos+1:>4}  C3_prep real {f_c3}")
         print()
@@ -691,8 +765,10 @@ def main():
     n_mask         = len(idx_c3_mask)
 
     # Convertir frames objetivo → posiciones de input (input = objetivo − 1)
-    if PREDICT_FROM < 2:
-        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Mínimo es 2.')
+    if PREDICT_FROM < 3:
+        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Mínimo es 3.')
+        print('  Para predecir el frame N se usa el input en pos N-1 y el diff')
+        print('  en pos N-2. Con N=2 el indice del diff seria 0, fuera de rango.')
         return
     if PREDICT_FROM - 1 > n_files:
         print(f'ERROR: el input requerido (pos {PREDICT_FROM-1}) no existe '
@@ -718,6 +794,12 @@ def main():
         print(f'Diffs encadenados C2 : {len(idx_diff_pred)} archivos disponibles')
     else:
         print('Diffs encadenados C2 : no disponibles — correr inferencia_regresion_C2.py primero')
+    n_auto_c2 = len([f for f in idx_c2_pred if f.stem.endswith('_auto_pred')])
+    n_auto_c3 = len([f for f in idx_pred_c3 if f.stem.endswith('_auto_pred')])
+    print(f'C2 autoregresivo     : {n_auto_c2} archivos'
+          + ('' if n_auto_c2 else '  <- el modo auto usara C2 REAL'))
+    print(f'C3 autoregresivo     : {n_auto_c3} archivos'
+          + ('' if n_auto_c3 else '  <- el modo auto usara C3 REAL'))
     print()
     if pos_con_gt:
         print_mapeo(pos_con_gt)

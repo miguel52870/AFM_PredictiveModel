@@ -16,7 +16,7 @@ Fuentes de datos:
     training_log.csv
     checkpoints/best_model.pth        ← solo para leer epoch y val_iou
     predicciones/npy/pred/            frame_NNN_indep_pred.npy
-    predicciones/npy/real/            frame_NNN_indep_real.npy
+    predicciones/npy/pred_con_gt/     frame_NNN_indep_pred_con_gt.npy
     predicciones/npy/error/           frame_NNN_indep_error.npy
     predicciones/metricas_independiente.csv
     predicciones/metricas_autoregresiva.csv
@@ -29,7 +29,12 @@ Fuentes de datos:
   resultados/modelo_regresion_c3/
     (misma estructura que segmentación)
 
-Salida: resultados/reporte_visual.pdf
+Salida:
+  resultados/reporte_visual.pdf
+  resultados/predicciones_frames/{modo}/{mask,canal_2,canal_3}/{png,npy}/
+    Predicciones de los 3 modelos reunidas por canal, con la misma
+    convencion de nombres de los scripts de inferencia
+    (frame_036_auto_pred). Mismos datos que el PDF y que los CSV.
 """
 
 import os
@@ -79,9 +84,18 @@ RC3_NPY     = RES_DIR / 'modelo_regresion_c3'  / 'predicciones' / 'npy'
 # ── Salida ────────────────────────────────────────────────────────
 OUTPUT_PDF  = RES_DIR / 'reporte_visual.pdf'
 
-# ── Modo preferido para visualización frame a frame ───────────────
-# 'independiente' | 'autoregresiva'
-MODO_FRAMES = 'independiente'
+# ── Exportacion de predicciones como archivos sueltos ────────────
+# Reexporta los NPY que ya generaron los scripts de inferencia a una
+# carpeta plana, renombrados con el stem del archivo original del
+# microscopio en lugar de 'frame_NNN'. No recalcula nada: los datos
+# son exactamente los mismos que produjeron los CSV de metricas.
+EXPORTAR_PREDICCIONES = True
+PRED_DIR              = RES_DIR / 'predicciones_frames'
+
+# ── Modos a incluir en las paginas frame a frame ─────────────────
+# Se genera una seccion por modo. Los frames sin ground truth van en
+# su propia seccion al final, para no duplicarlos en cada modo.
+MODOS_FRAMES = ['independiente', 'autoregresiva']
 
 # ── Colores ───────────────────────────────────────────────────────
 BLUE   = '#378ADD'
@@ -149,10 +163,16 @@ def avg_str(lst, key, fmt='.4f'):
 # 3. CARGAR RESULTADOS DESDE DISCO
 # =================================================================
 
-def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
+def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo,
+                       incluir_gt=True, incluir_sin_gt=True):
     """
     Carga los arrays NPY de pred/real/error de los 3 modelos para un modo dado.
     Incluye frames con GT (sufijo _indep_ / _auto_) y sin GT (sufijo _sin_gt_).
+
+    Los frames sin GT son los mismos sin importar el modo, por eso se pueden
+    excluir con incluir_sin_gt=False al recorrer varios modos y cargarlos
+    una sola vez en su propia seccion.
+
     Retorna lista de dicts por frame, ordenada por número de frame.
     """
     sufijo = 'indep' if modo == 'independiente' else 'auto'
@@ -181,51 +201,64 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
         try: return int(path.stem.split('_')[1])
         except: return 0
 
+    def _by_frame(lista):
+        """Indexa una lista de rutas por numero de frame."""
+        return {_frame_num(p): p for p in lista}
+
     def _load(path): return load_npy(path, normalize=True) if path else None
     def _load_error(path): return load_npy(path, normalize=False) if path else None
 
     frames = {}
 
-    # Registrar frames con GT
-    for i in range(min(len(pred_seg_gt), len(pred_rc2_gt), len(pred_rc3_gt))):
-        fn = _frame_num(pred_seg_gt[i])
+    # Registrar frames con GT — emparejados por NUMERO DE FRAME, no por
+    # indice de lista: si alguna carpeta tiene un archivo de mas, emparejar
+    # por posicion desalinearia los tres modelos en silencio.
+    m_pseg, m_rseg, m_eseg = _by_frame(pred_seg_gt), _by_frame(real_seg_gt), _by_frame(error_seg_gt)
+    m_p2,   m_r2,   m_e2   = _by_frame(pred_rc2_gt), _by_frame(real_rc2_gt), _by_frame(error_rc2_gt)
+    m_p3,   m_r3,   m_e3   = _by_frame(pred_rc3_gt), _by_frame(real_rc3_gt), _by_frame(error_rc3_gt)
+
+    comunes = sorted(set(m_pseg) & set(m_p2) & set(m_p3)) if incluir_gt else []
+    faltan  = ((set(m_pseg) | set(m_p2) | set(m_p3)) - set(comunes)) if incluir_gt else set()
+    if faltan:
+        print(f"  AVISO: frames presentes en unos modelos y no en otros: {sorted(faltan)}")
+
+    for orden, fn in enumerate(comunes):
         frames[fn] = {
-            'frame': fn, 'modo': modo, 'has_gt': True,
-            'seg_pred':  _load(pred_seg_gt[i]),
-            'seg_real':  _load(real_seg_gt[i])  if i < len(real_seg_gt)  else None,
-            'seg_error': _load_error(error_seg_gt[i]) if i < len(error_seg_gt) else None, # <-- Modificado
-            'rc2_pred':  _load(pred_rc2_gt[i]),
-            'rc2_real':  _load(real_rc2_gt[i])  if i < len(real_rc2_gt)  else None,
-            'rc2_error': _load_error(error_rc2_gt[i]) if i < len(error_rc2_gt) else None, # <-- Modificado
-            'rc3_pred':  _load(pred_rc3_gt[i]),
-            'rc3_real':  _load(real_rc3_gt[i])  if i < len(real_rc3_gt)  else None,
-            'rc3_error': _load_error(error_rc3_gt[i]) if i < len(error_rc3_gt) else None, # <-- Modificado
+            'frame': fn, 'modo': modo, 'has_gt': True, 'paso': orden,
+            'seg_pred':  _load(m_pseg.get(fn)),
+            'seg_real':  _load(m_rseg.get(fn)),
+            'seg_error': _load_error(m_eseg.get(fn)),
+            'rc2_pred':  _load(m_p2.get(fn)),
+            'rc2_real':  _load(m_r2.get(fn)),
+            'rc2_error': _load_error(m_e2.get(fn)),
+            'rc3_pred':  _load(m_p3.get(fn)),
+            'rc3_real':  _load(m_r3.get(fn)),
+            'rc3_error': _load_error(m_e3.get(fn)),
         }
 
     # Registrar frames sin GT
     # Para comparación se usa la predicción del frame anterior (N-1 predicho)
     # Columna "real" = pred del frame anterior | Columna "error" = |pred_N - pred_{N-1}|
-    for i in range(min(len(pred_seg_sgt), len(pred_rc2_sgt), len(pred_rc3_sgt))):
-        fn  = _frame_num(pred_seg_sgt[i])
-        fn_prev = fn - 1  # frame predicho anterior
+    m_sseg, m_s2, m_s3 = _by_frame(pred_seg_sgt), _by_frame(pred_rc2_sgt), _by_frame(pred_rc3_sgt)
+    comunes_sgt = sorted(set(m_sseg) & set(m_s2) & set(m_s3)) if incluir_sin_gt else []
 
-        # Buscar predicción del frame anterior (puede ser sin_gt o indep)
+    for orden, fn in enumerate(comunes_sgt):
+        fn_prev = fn - 1  # frame anterior de la cadena
+
         def _prev_pred(npy_dir, fn_prev):
-            for pat in [f'frame_{fn_prev:03d}_sin_gt_pred.npy',
-                        f'frame_{fn_prev:03d}_indep_pred.npy',
-                        f'frame_{fn_prev:03d}_auto_pred.npy']:
-                cands = list(Path(npy_dir / 'pred').glob(pat))
-                if cands:
-                    return _load(cands[0])
-            return None
+            """Prediccion del frame anterior en la MISMA cadena sin GT.
+            No se cae a '_indep_pred': en el paso 0 el input fue el frame
+            real, no una prediccion, y mostrarla seria enganoso."""
+            cands = list(Path(npy_dir / 'pred').glob(f'frame_{fn_prev:03d}_sin_gt_pred.npy'))
+            return _load(cands[0]) if cands else None
 
         seg_prev = _prev_pred(seg_npy, fn_prev)
         rc2_prev = _prev_pred(rc2_npy, fn_prev)
         rc3_prev = _prev_pred(rc3_npy, fn_prev)
 
-        seg_cur  = _load(pred_seg_sgt[i])
-        rc2_cur  = _load(pred_rc2_sgt[i])
-        rc3_cur  = _load(pred_rc3_sgt[i])
+        seg_cur  = _load(m_sseg.get(fn))
+        rc2_cur  = _load(m_s2.get(fn))
+        rc3_cur  = _load(m_s3.get(fn))
 
         # Intentar cargar error sin GT desde disco (generado por run_sin_gt)
         def _load_error_sgt(npy_dir, fn):
@@ -245,7 +278,7 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
             rc3_err = np.abs(rc3_cur - rc3_prev)
 
         frames[fn] = {
-            'frame': fn, 'modo': 'sin_gt', 'has_gt': False,
+            'frame': fn, 'modo': 'sin_gt', 'has_gt': False, 'paso': orden,
             'seg_pred':  seg_cur,
             'seg_real':  seg_prev,
             'seg_error': seg_err,
@@ -267,62 +300,73 @@ def cargar_frames_modo(seg_npy, rc2_npy, rc3_npy, modo):
     print(f"  Frames con GT: {n_gt} | Frames sin GT: {n_sgt} | Total: {len(result)}")
     return result
 
-def cargar_inputs_frame(frame_num, data_dir, rc2_npy=None, rc3_npy=None):
+def cargar_inputs_frame(frame_num, data_dir, modo, rc2_npy=None, rc3_npy=None,
+                        paso=0):
     """
-    Carga los inputs usados para predecir frame_num (input = frame_num - 1).
-    Para frames sin GT: busca predicciones anteriores por nombre de archivo.
-    Para frames con GT: usa datos reales de data/.
-    Patrones buscados: _sin_gt_pred, _indep_pred, _auto_pred (en ese orden).
+    Reconstruye los inputs que los scripts de inferencia alimentaron al modelo
+    para predecir frame_num. El input corresponde al frame frame_num - 1.
+
+    Reglas por modo (deben coincidir con los scripts de inferencia):
+      independiente -> los 3 canales reales, siempre.
+      autoregresiva -> paso 0 real; pasos 1+ toman '_auto_pred' de C2 y C3
+                       y el '_auto_diff' de C2.
+      sin_gt        -> paso 0 real; pasos 1+ toman '_sin_gt_pred' de C2 y C3
+                       y el '_sin_gt_diff_pred' de C2.
+
+    Nota sobre los diffs: C2 los guarda bajo el stem del frame TARGET aunque
+    su contenido corresponda al frame de input, por eso la clave es frame_num
+    y no frame_num - 1.
     """
     inp = frame_num - 1
 
-    def _find_prev(npy_dir, fn_prev):
-        """Busca la predicción del frame fn_prev en npy_dir/pred/."""
+    def _cargar(npy_dir, sub, stem):
         if npy_dir is None:
             return None
-        for pat in [f'frame_{fn_prev:03d}_sin_gt_pred.npy',
-                    f'frame_{fn_prev:03d}_indep_pred.npy',
-                    f'frame_{fn_prev:03d}_auto_pred.npy']:
-            cands = list(Path(npy_dir / 'pred').glob(pat))
-            if cands:
-                return load_npy(cands[0])
-        return None
+        cands = list(Path(npy_dir / sub).glob(stem + '.npy'))
+        return load_npy(cands[0]) if cands else None
+
+    # Sufijo de los archivos segun el modo. En el paso 0 no hay predicciones
+    # previas del pipeline: los inputs fueron reales.
+    if modo == 'autoregresiva' and paso > 0:
+        suf_pred, suf_diff = 'auto_pred', 'auto_diff'
+    elif modo == 'sin_gt' and paso > 0:
+        suf_pred, suf_diff = 'sin_gt_pred', 'sin_gt_diff_pred'
+    else:
+        suf_pred, suf_diff = None, None
 
     # ── C2 input ──────────────────────────────────────────────────
-    c2_prev = _find_prev(rc2_npy, inp)
-    if c2_prev is not None:
-        c2_input  = c2_prev
+    c2_input = _cargar(rc2_npy, 'pred', f'frame_{inp:03d}_{suf_pred}') if suf_pred else None
+    if c2_input is not None:
         c2_fuente = f'C2 predicho frame {inp}'
     else:
-        idx_c2   = sorted((data_dir / 'canal_2').glob('*.npy'))
+        idx_c2    = sorted((data_dir / 'canal_2').glob('*.npy'))
         c2_input  = load_npy(idx_c2[inp-1]) if 0 < inp <= len(idx_c2) else None
         c2_fuente = f'C2 real frame {inp}'
 
     # ── C2_diff input ─────────────────────────────────────────────
-    c2_diff = None
-    if rc2_npy is not None:
-        diff_cands = list(Path(rc2_npy / 'diff_pred').glob(
-            f'frame_{frame_num:03d}_sin_gt_diff_pred.npy'))
-        if diff_cands:
-            c2_diff = load_npy(diff_cands[0])
-    if c2_diff is None:
-        idx_diff = sorted((data_dir / 'diff').glob('*.npy'))
-        pos_diff = min(inp, len(idx_diff))
-        c2_diff  = load_npy(idx_diff[pos_diff-1]) if pos_diff >= 1 else None
+    c2_diff = _cargar(rc2_npy, 'diff_pred', f'frame_{frame_num:03d}_{suf_diff}') if suf_diff else None
+    if c2_diff is not None:
+        diff_fuente = 'encadenado'
+    else:
+        # El diff del frame N esta en la posicion N-1: diff/ arranca un frame
+        # despues que canal_2/. Usar 'inp' cargaria el diff del frame target.
+        idx_diff    = sorted((data_dir / 'diff').glob('*.npy'))
+        pos_diff    = min(inp - 1, len(idx_diff))
+        c2_diff     = load_npy(idx_diff[pos_diff-1]) if pos_diff >= 1 else None
+        diff_fuente = 'real'
 
     # ── C3 input ──────────────────────────────────────────────────
-    # Siempre usar C3 predicho continuo (rc3), nunca la máscara binaria
-    c3_prev = _find_prev(rc3_npy, inp)
-    if c3_prev is not None:
-        c3_input  = c3_prev
-        c3_fuente = f'C3 pred frame {inp}'
+    # Siempre fase continua (de regresion C3), nunca la mascara binaria.
+    c3_input = _cargar(rc3_npy, 'pred', f'frame_{inp:03d}_{suf_pred}') if suf_pred else None
+    if c3_input is not None:
+        c3_fuente = f'C3 predicho frame {inp}'
     else:
-        idx_c3  = sorted((data_dir / 'canal_3').glob('*.npy'))
-        pos_c3  = min(inp, len(idx_c3))
+        idx_c3    = sorted((data_dir / 'canal_3').glob('*.npy'))
+        pos_c3    = min(inp, len(idx_c3))
         c3_input  = load_npy(idx_c3[pos_c3-1]) if pos_c3 >= 1 else None
         c3_fuente = f'C3 real frame {inp}'
 
-    return c2_input, c2_diff, c3_input, c2_fuente, c3_fuente, 'twilight'
+    return c2_input, c2_diff, c3_input, c2_fuente, c3_fuente, diff_fuente
 
 # =================================================================
 # 4. UTILIDADES DE VISUALIZACIÓN
@@ -393,8 +437,8 @@ def page_portada(pdf, seg_ckpt, rc2_ckpt, rc3_ckpt):
     for i, (k, v) in enumerate([
         ('Inputs',       'C2_prep[N] + C2_diff[N] + C3_prep[N]'),
         ('Arquitectura', 'U-Net + EfficientNet-B0 (ImageNet pretrained)'),
-        ('Dataset',      '38 pares train / 6 pares val (split cronológico)'),
-        ('Reporte',      f"Modo de visualización: {MODO_FRAMES}"),
+        ('Dataset',      '38 pares totales — 32 train / 6 val (split cronológico)'),
+        ('Reporte',      f"Secciones: {', '.join(MODOS_FRAMES)} + sin ground truth"),
     ]):
         y = 0.34 - i * 0.048
         ax.text(0.28, y, k+':', ha='right', fontsize=9, fontweight='bold',
@@ -514,16 +558,15 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
     else:
         titulo = f'Frame {fn}  [{frame_data["modo"]}]  — prediccion pura (sin ground truth)'
 
-    # Cargar inputs usados por el modelo (real o predicho del frame anterior)
-    has_sin_gt = not frame_data['has_gt']
-    c2_prep, c2_diff, c3_prep, c2_fuente, c3_fuente, c3_cmap = cargar_inputs_frame(
-        fn, DATA_DIR,
-        rc2_npy=RC2_NPY if has_sin_gt else None,
-        rc3_npy=RC3_NPY if has_sin_gt else None,
+    # Reconstruir los inputs que uso el script de inferencia para este frame.
+    # 'paso' distingue el primer frame (inputs reales) de los siguientes.
+    modo_frame = frame_data['modo']
+    paso       = frame_data.get('paso', 0)
+    c2_prep, c2_diff, c3_prep, c2_fuente, c3_fuente, diff_fuente = cargar_inputs_frame(
+        fn, DATA_DIR, modo_frame,
+        rc2_npy=RC2_NPY, rc3_npy=RC3_NPY, paso=paso,
     )
-    if frame_data['has_gt']:
-        c2_fuente = f'C2 real frame {fn-1}'
-        c3_fuente = f'C3 real frame {fn-1}'
+    c3_cmap = 'twilight'
 
     fig = plt.figure(figsize=(12, 16))
     fig.suptitle(titulo, fontsize=11, fontweight='bold', y=0.99)
@@ -533,7 +576,7 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
     # Fila 0 — Inputs (real o predicho del frame anterior según corresponda)
     for col, (data, title, cmap) in enumerate([
         (c2_prep, f'C2 prep\n({c2_fuente})',        'RdBu_r'),
-        (c2_diff, 'C2 diff\n(cambio entre frames)', 'hot'),
+        (c2_diff, f'C2 diff\n({diff_fuente})',      'hot'),
         (c3_prep, f'C3 prep\n({c3_fuente})',        c3_cmap),
     ]):
         ax = fig.add_subplot(gs[0, col])
@@ -543,10 +586,10 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
     # Fila 1 — Segmentación
     for col, (data, title, cmap, vmin, vmax) in enumerate([
         (frame_data['seg_pred'],  'Mascara predicha\n(binaria)',
-         'gray', 0, 1),
+         'gray_r', 0, 1),
         (frame_data['seg_real'],
          'GT (Otsu)' if has_gt else f'Pred\nframe {fn-1}',
-         'gray', 0, 1),
+         'gray_r', 0, 1),
         (frame_data['seg_error'],
          'Error seg.\n|pred-real|' if has_gt else f'|mask{fn} - mask{fn-1}|',
          'Reds', 0, 1),
@@ -590,6 +633,63 @@ def page_frame(pdf, frame_data, met_seg, met_rc2, met_rc3):
         ax0.text(-0.25, 0.5, label, ha='right', va='center', fontsize=8,
                  color=color, fontweight='bold', transform=ax0.transAxes, rotation=90)
 
+    pdf.savefig(fig, bbox_inches='tight'); plt.close()
+
+
+def exportar_predicciones(frames_data, modo, data_dir, out_root):
+    """
+    Reexporta las predicciones ya cargadas a PNG y NPY en una carpeta
+    organizada por canal, usando la misma convencion de nombres que los
+    scripts de inferencia: 'frame_036_auto_pred'.
+
+    El valor de esta carpeta es la organizacion: reune los 3 modelos por
+    canal en un solo lugar, en vez de repartidos en tres arboles de
+    resultados distintos.
+
+    No recalcula inferencia: solo reescribe lo que ya esta en disco.
+    """
+    if not frames_data:
+        return 0
+
+    # Sufijo de modo, igual al que usan los scripts de inferencia
+    suf_modo = {'independiente': 'indep',
+                'autoregresiva': 'auto',
+                'sin_gt':        'sin_gt'}.get(modo, modo)
+
+    destinos = {
+        'seg': (out_root / modo / 'mask'    / 'png', out_root / modo / 'mask'    / 'npy', 'gray_r'),
+        'rc2': (out_root / modo / 'canal_2' / 'png', out_root / modo / 'canal_2' / 'npy', 'RdBu_r'),
+        'rc3': (out_root / modo / 'canal_3' / 'png', out_root / modo / 'canal_3' / 'npy', 'twilight'),
+    }
+    for png_dir, npy_dir, _ in destinos.values():
+        os.makedirs(str(png_dir), exist_ok=True)
+        os.makedirs(str(npy_dir), exist_ok=True)
+
+    n = 0
+    for fd in frames_data:
+        stem = f"frame_{fd['frame']:03d}_{suf_modo}_pred"
+        for clave, (png_dir, npy_dir, cmap) in destinos.items():
+            arr = fd.get(f'{clave}_pred')
+            if arr is None:
+                continue
+            np.save(str(npy_dir / (stem + '.npy')), arr)
+            plt.imsave(str(png_dir / (stem + '.png')), arr,
+                       cmap=cmap, vmin=0, vmax=1)
+            n += 1
+    return n
+
+
+def page_seccion(pdf, titulo, subtitulo, color):
+    """Pagina divisoria entre secciones del reporte."""
+    fig = plt.figure(figsize=(11, 8.5))
+    fig.patch.set_facecolor('white')
+    ax = fig.add_axes([0, 0, 1, 1]); ax.axis('off')
+    ax.add_patch(plt.Rectangle((0.08, 0.44), 0.84, 0.14, transform=ax.transAxes,
+                                facecolor=f'{color}11', edgecolor=color, linewidth=2))
+    ax.text(0.5, 0.53, titulo, ha='center', va='center', fontsize=20,
+            fontweight='bold', color=color, transform=ax.transAxes)
+    ax.text(0.5, 0.475, subtitulo, ha='center', va='center', fontsize=10,
+            color='#5F5E5A', transform=ax.transAxes)
     pdf.savefig(fig, bbox_inches='tight'); plt.close()
 
 
@@ -815,10 +915,21 @@ def main():
     print(f"  C3   indep={len(rc3_i)} frames | auto={len(rc3_a)} frames")
 
     # ── Cargar arrays NPY de predicciones ────────────────────────
-    print(f"\nCargando arrays NPY ({MODO_FRAMES})...")
-    frames_data = cargar_frames_modo(SEG_NPY, RC2_NPY, RC3_NPY, MODO_FRAMES)
-    print(f"  {len(frames_data)} frames cargados")
-    if not frames_data:
+    # Una tanda por modo (solo frames con GT) + una tanda con los frames
+    # sin GT, que son identicos en ambos modos y se cargan una sola vez.
+    frames_por_modo = {}
+    for modo in MODOS_FRAMES:
+        print(f"\nCargando arrays NPY ({modo})...")
+        fr = cargar_frames_modo(SEG_NPY, RC2_NPY, RC3_NPY, modo,
+                                incluir_gt=True, incluir_sin_gt=False)
+        if fr:
+            frames_por_modo[modo] = fr
+
+    print("\nCargando arrays NPY (sin ground truth)...")
+    frames_sgt = cargar_frames_modo(SEG_NPY, RC2_NPY, RC3_NPY, 'independiente',
+                                    incluir_gt=False, incluir_sin_gt=True)
+
+    if not frames_por_modo and not frames_sgt:
         print("  ERROR: no se encontraron archivos NPY de predicciones.")
         print(f"  Verificar carpetas en: {SEG_NPY}")
         return
@@ -832,18 +943,37 @@ def main():
         print("  Curvas...");         page_curvas(pdf, seg_log, rc2_log, rc3_log)
         print("  Métricas...");       page_metricas(pdf, seg_i, seg_a, rc2_i, rc2_a, rc3_i, rc3_a)
 
-        for i, fd in enumerate(frames_data):
-            print(f"  Frame {fd['frame']}...")
-            page_frame(pdf, fd, seg_i, rc2_i, rc3_i)
+        subt = {
+            'independiente': 'Cada prediccion parte de datos reales del frame anterior',
+            'autoregresiva': 'Paso 0 real; desde el paso 1 los 3 canales vienen del pipeline',
+        }
+        cols = {'independiente': BLUE, 'autoregresiva': ORANGE}
 
-        print("  Resumen segmentación...")
-        page_resumen(pdf, frames_data, 'seg', 'gray', BLUE)
+        for modo, frames_data in frames_por_modo.items():
+            print(f"\n  === Seccion: {modo} ===")
+            page_seccion(pdf, f'Modo {modo}', subt.get(modo, ''),
+                         cols.get(modo, GRAY))
+            for fd in frames_data:
+                print(f"  Frame {fd['frame']} ({modo})...")
+                page_frame(pdf, fd, seg_i, rc2_i, rc3_i)
+            print("  Resumen segmentación...")
+            page_resumen(pdf, frames_data, 'seg', 'gray_r', BLUE)
+            print("  Resumen C2...")
+            page_resumen(pdf, frames_data, 'rc2', 'RdBu_r', PURPLE)
+            print("  Resumen C3...")
+            page_resumen(pdf, frames_data, 'rc3', 'twilight', TEAL)
 
-        print("  Resumen C2...")
-        page_resumen(pdf, frames_data, 'rc2', 'RdBu_r', PURPLE)
-
-        print("  Resumen C3...")
-        page_resumen(pdf, frames_data, 'rc3', 'twilight', TEAL)
+        if frames_sgt:
+            print("\n  === Seccion: sin ground truth ===")
+            page_seccion(pdf, 'Sin ground truth',
+                         'Prediccion encadenada — sin frame real contra que comparar',
+                         GREEN)
+            for fd in frames_sgt:
+                print(f"  Frame {fd['frame']} (sin GT)...")
+                page_frame(pdf, fd, seg_i, rc2_i, rc3_i)
+            page_resumen(pdf, frames_sgt, 'seg', 'gray_r', BLUE)
+            page_resumen(pdf, frames_sgt, 'rc2', 'RdBu_r', PURPLE)
+            page_resumen(pdf, frames_sgt, 'rc3', 'twilight', TEAL)
 
         print("  Análisis de error...")
         page_error(pdf, seg_i, seg_a, rc2_i, rc2_a, rc3_i, rc3_a)
@@ -853,6 +983,20 @@ def main():
                         seg_ckpt, rc2_ckpt, rc3_ckpt)
 
     print(f"\nReporte generado: {OUTPUT_PDF}")
+
+    # ── Exportar predicciones con nombres originales ─────────────
+    if EXPORTAR_PREDICCIONES:
+        print(f"\nExportando predicciones a: {PRED_DIR}")
+        total = 0
+        for modo, fr in frames_por_modo.items():
+            k = exportar_predicciones(fr, modo, DATA_DIR, PRED_DIR)
+            print(f"  {modo:<15} : {k} archivos")
+            total += k
+        if frames_sgt:
+            k = exportar_predicciones(frames_sgt, 'sin_gt', DATA_DIR, PRED_DIR)
+            print(f"  {'sin_gt':<15} : {k} archivos")
+            total += k
+        print(f"  Total: {total} PNG + {total} NPY")
 
 if __name__ == '__main__':
     main()

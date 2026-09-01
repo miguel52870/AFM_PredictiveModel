@@ -56,6 +56,8 @@ OUTPUT_DIR   = BASE_DIR / 'resultados' / 'modelo_regresion_c3' / 'predicciones'
 DIR_DIFF_PRED  = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'diff_pred'
 # C2 predicho para usar como C2_prep input en frames sin GT
 DIR_PRED_C2    = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'pred_c2'
+# Predicciones de C2 en modo autoregresivo (frame_NNN_auto_pred.npy)
+DIR_C2_PRED    = BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones' / 'npy' / 'pred'
 
 # Subcarpetas de salida
 NPY_PRED  = OUTPUT_DIR / 'npy' / 'pred'
@@ -110,6 +112,8 @@ idx_c3_target = build_file_index(DIR_C3_PREP)
 idx_diff_pred  = build_file_index(DIR_DIFF_PRED) if DIR_DIFF_PRED.exists() else []
 # Indice de C2 predicho (para usar como C2_prep en frames sin GT)
 idx_pred_c2    = build_file_index(DIR_PRED_C2)   if DIR_PRED_C2.exists()   else []
+# Indice de predicciones autoregresivas de C2 (para el modo autoregresivo de C3)
+idx_c2_pred    = build_file_index(DIR_C2_PRED)   if DIR_C2_PRED.exists()   else []
 
 # =================================================================
 # 3. UTILIDADES
@@ -171,6 +175,35 @@ def load_pred_c2(frame_out):
             return arr
     return None
 
+def load_auto_pred_c2(frame):
+    """C2 predicho en modo autoregresivo para el frame indicado.
+
+    C2 guarda su prediccion del frame N como 'frame_{N}_auto_pred', asi que
+    la clave es directamente el frame de INPUT que necesita C3.
+    None si no existe.
+    """
+    stem_buscado = f"frame_{frame:03d}_auto_pred"
+    for f in idx_c2_pred:
+        if f.stem == stem_buscado:
+            arr = np.load(str(f)).astype(np.float32)
+            mn, mx = arr.min(), arr.max()
+            if mx - mn > 1e-8: arr = (arr - mn) / (mx - mn)
+            return arr
+    return None
+
+def load_auto_diff_c2(frame_in):
+    """Diff encadenado que C2 uso como input en el frame indicado.
+
+    C2 guarda ese diff bajo el stem del frame TARGET, aunque su contenido
+    corresponda al frame de input. Por eso aqui se busca frame_in + 1.
+    None si no existe.
+    """
+    stem_buscado = f"frame_{frame_in + 1:03d}_auto_diff"
+    for f in idx_diff_pred:
+        if f.stem == stem_buscado:
+            return np.load(str(f)).astype(np.float32)
+    return None
+
 # =================================================================
 # 4. MAPEO DE POSICIONES
 # =================================================================
@@ -182,8 +215,10 @@ def print_mapeo(positions):
     print("─" * 65)
     for pos in positions:
         f_in   = get_file(idx_c2_prep, pos).stem
+        f_diff = get_file(idx_c2_diff, pos - 1).stem
         f_real = get_file(idx_c3_prep, pos + 1).stem
         print(f"  {pos:>4}  input        {f_in}")
+        print(f"  {pos-1:>4}  diff         {f_diff}")
         print(f"  {pos+1:>4}  C3 target    {f_real}")
         print()
     print("─" * 65)
@@ -214,7 +249,9 @@ def run_independiente(model, device, positions):
     results = []
     for pos in positions:
         c2_prep = load_npy(get_file(idx_c2_prep, pos))
-        c2_diff = load_npy(get_file(idx_c2_diff, pos))
+        # El diff del frame N esta en la posicion N-1. Usar 'pos' cargaria
+        # |C2[N+1] - C2[N]|, es decir el cambio hacia el target — fuga.
+        c2_diff = load_npy(get_file(idx_c2_diff, pos - 1))
         c3_prep = load_npy(get_file(idx_c3_prep, pos))
         c3_real = load_npy(get_file(idx_c3_target, pos + 1))
 
@@ -245,19 +282,39 @@ def run_independiente(model, device, positions):
 
 def run_autoregresiva(model, device, positions):
     print("─" * 65)
-    print("MODO: Autoregresiva (C3 predicho como input siguiente)")
+    print("MODO: Autoregresiva (C2, C2_diff y C3 predichos como input siguiente)")
+    if idx_c2_pred:
+        print("  C2_prep y C2_diff se toman de inferencia_regresion_C2.py (modo auto)")
+    else:
+        print("  AVISO: no se encontraron predicciones autoregresivas de C2.")
+        print("  C2_prep y C2_diff caeran a datos REALES — la degradacion medida")
+        print("  quedara subestimada. Correr inferencia_regresion_C2.py primero.")
     print("─" * 65)
     results   = []
     prev_pred = None
     for i, pos in enumerate(positions):
-        c2_prep = load_npy(get_file(idx_c2_prep, pos))
-        c2_diff = load_npy(get_file(idx_c2_diff, pos))
         c3_real = load_npy(get_file(idx_c3_target, pos + 1))
 
-        if i == 0 or prev_pred is None:
+        # --- Paso 0: todo real. Pasos 1+: C2 y diff vienen del pipeline ---
+        # El frame de input es 'pos'; C2 predijo ese frame en su paso anterior.
+        if i == 0:
+            c2_prep  = load_npy(get_file(idx_c2_prep, pos))
+            c2_diff  = load_npy(get_file(idx_c2_diff, pos - 1))
             c3_input = load_npy(get_file(idx_c3_prep, pos))
-            fuente   = 'real'
+            c2_src, diff_src, fuente = 'real', 'real', 'real'
         else:
+            c2_auto = load_auto_pred_c2(pos)
+            if c2_auto is not None:
+                c2_prep, c2_src = c2_auto, 'C2 auto'
+            else:
+                c2_prep, c2_src = load_npy(get_file(idx_c2_prep, pos)), 'real (fallback)'
+
+            d_auto = load_auto_diff_c2(pos)
+            if d_auto is not None:
+                c2_diff, diff_src = d_auto, 'encadenado C2'
+            else:
+                c2_diff, diff_src = load_npy(get_file(idx_c2_diff, pos - 1)), 'real (fallback)'
+
             c3_input = prev_pred
             fuente   = 'predicha'
 
@@ -270,7 +327,7 @@ def run_autoregresiva(model, device, positions):
         print(f"  Pos {pos:>3} [{fname_in[:30]}]")
         print(f"    -> {pos+1:>3} [{fname_out[:30]}]")
         print(f"       SSIM={metrics['ssim']:.4f}  PSNR={metrics['psnr']:.2f} dB  "
-              f"MSE={metrics['mse']:.6f}  [C3: {fuente}]")
+              f"MSE={metrics['mse']:.6f}  [C2: {c2_src} | diff: {diff_src} | C3: {fuente}]")
 
         stem = f"frame_{pos+1:03d}_auto"
         save_frame_files(pred,                   stem + '_pred',  NPY_PRED,  PNG_PRED,  'twilight')
@@ -284,6 +341,8 @@ def run_autoregresiva(model, device, positions):
             'pred': pred, 'real': c3_real,
             'metrics': metrics, 'modo': 'autoregresiva',
             'c3_fuente': fuente,
+            'c2_fuente': c2_src,
+            'diff_fuente': diff_src,
         })
         prev_pred = pred
     return results
@@ -313,23 +372,29 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
     prev_pred = None
 
     for i, pos in enumerate(positions):
-        # C2_prep: usar C2 predicho si existe, sino último real disponible
-        c2_pred = load_pred_c2(pos + 1)
+        # C2_prep: el modelo fue entrenado con C2_prep[N] para predecir C3[N+1],
+        # asi que el slot debe llevar el frame de INPUT (pos), no el target.
+        # C2 guarda su prediccion del frame pos bajo el stem 'frame_{pos}'.
+        # En el paso 0 esa prediccion no existe todavia -> cae al ultimo real,
+        # que es justamente el input correcto.
+        c2_pred = load_pred_c2(pos)
         if c2_pred is not None:
             c2_prep  = c2_pred
-            c2p_src  = f'C2 predicho frame {pos+1}'
+            c2p_src  = f'C2 predicho frame {pos}'
         else:
             c2_pos   = min(pos, n_c2)
             c2_prep  = load_npy(get_file(idx_c2_prep, c2_pos))
             c2p_src  = f'C2 real (pos {c2_pos})'
 
         # C2_diff: diff encadenado de C2 si existe, sino ultimo real
+        # C2 guarda su diff bajo el stem del frame target, pero el CONTENIDO
+        # corresponde al frame de input. Por eso la clave aqui es pos+1.
         diff_pred = load_diff_pred(pos + 1)
         if diff_pred is not None:
             c2_diff     = diff_pred
-            diff_fuente = f'encadenado C2 frame {pos+1}'
+            diff_fuente = f'encadenado C2 (input frame {pos})'
         else:
-            diff_pos    = min(pos, n_diff)
+            diff_pos    = min(pos - 1, n_diff)
             c2_diff     = (load_npy(get_file(idx_c2_diff, diff_pos))
                            if diff_pos >= 1
                            else np.zeros((CROP_H, CROP_W), dtype=np.float32))
@@ -612,8 +677,10 @@ def main():
     n_diff  = len(idx_c2_diff)
     n_c3    = len(idx_c3_prep)
 
-    if PREDICT_FROM < 2:
-        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Minimo es 2.')
+    if PREDICT_FROM < 3:
+        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Minimo es 3.')
+        print('  Para predecir el frame N se usa el input en pos N-1 y el diff')
+        print('  en pos N-2. Con N=2 el indice del diff seria 0, fuera de rango.')
         return
     if PREDICT_FROM - 1 > n_files:
         print(f'ERROR: el input requerido (pos {PREDICT_FROM-1}) no existe '
@@ -637,6 +704,11 @@ def main():
         print(f'Diffs encadenados C2 : {len(idx_diff_pred)} archivos disponibles')
     else:
         print('Diffs encadenados C2 : no disponibles - correr inferencia_regresion_C2.py primero')
+    n_auto = len([f for f in idx_c2_pred if f.stem.endswith('_auto_pred')])
+    if n_auto:
+        print(f'C2 autoregresivo     : {n_auto} archivos disponibles')
+    else:
+        print('C2 autoregresivo     : no disponible - el modo auto usara C2 y diff REALES')
     print()
     if pos_con_gt:
         print_mapeo(pos_con_gt)

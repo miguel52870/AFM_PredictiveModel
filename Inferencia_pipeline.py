@@ -7,11 +7,17 @@ Ejecuta secuencialmente:
   2. inferencia_regresion_C3   → usa diffs de C2, genera C3 predicho
   3. inferencia_segmentacion   → usa diffs de C2, genera máscaras predichas
 
-El orden es importante:
-  - C2 genera los diffs encadenados Y el C2_prep predicho
-  - C3 usa el C2_prep predicho de C2 como input (frames sin GT)
-  - Seg usa el C2_prep predicho de C2 y el C3_prep predicho de C3 (frames sin GT)
-Para frames sin GT los 3 canales de entrada son completamente predichos.
+El orden es OBLIGATORIO, no solo recomendado:
+  - C2 genera los diffs encadenados, el C2 autoregresivo y el C2_prep predicho
+  - C3 usa el C2 autoregresivo y los diffs de C2 como input
+  - Seg usa el C2 de C2 y el C3 de C3 como input
+
+Esto aplica tanto al modo autoregresivo (frames con GT) como al modo
+sin GT. En ambos, a partir del paso 1 los 3 canales de entrada son
+completamente predichos: ninguno es real.
+
+Si se desactiva un modelo, los siguientes NO caen a datos reales —
+leen lo que haya quedado en disco de una corrida previa. Ver avisos.
 
 Uso:
   python inferencia_pipeline.py
@@ -54,6 +60,13 @@ INFERENCE_MODE = 'ambos'
 
 # ── Threshold de binarización (segmentación) ─────────────────────
 THRESHOLD    = 0.5
+
+# ── Diff encadenado (solo aplica a inferencia_regresion_C2) ──────
+# Renormaliza el diff encadenado a [0,1] para igualar la escala de los
+# diffs reales. True = consistente con el entrenamiento.
+NORMALIZAR_DIFF_ENCADENADO = True
+# Guarda el diff del modo autoregresivo — C3 y Seg lo necesitan.
+GUARDAR_DIFF_AUTO          = True
 
 # ── Modelos a correr ─────────────────────────────────────────────
 CORRER_C2  = True
@@ -103,6 +116,11 @@ def inyectar_config(mod):
     else:
         mod.CROP_W = CROP_WIDTH
         mod.CROP_H = CROP_HEIGHT
+    # Solo inferencia_regresion_C2 define estos flags
+    if hasattr(mod, 'NORMALIZAR_DIFF_ENCADENADO'):
+        mod.NORMALIZAR_DIFF_ENCADENADO = NORMALIZAR_DIFF_ENCADENADO
+    if hasattr(mod, 'GUARDAR_DIFF_AUTO'):
+        mod.GUARDAR_DIFF_AUTO = GUARDAR_DIFF_AUTO
 
 def correr_inferencia(nombre, script_path):
     print(f"\n{'='*65}")
@@ -143,14 +161,27 @@ def main():
     print()
 
     if not CORRER_C2 and (CORRER_C3 or CORRER_SEG):
-        print("AVISO: CORRER_C2=False — C3 y segmentación no tendrán")
-        print("  diffs encadenados NI C2_prep predicho para frames sin GT.")
-        print("  Usarán el último C2 real disponible como alternativa.")
+        print("!" * 65)
+        print("AVISO: CORRER_C2=False")
+        print("  C3 y segmentacion NO caeran a datos reales: van a leer los")
+        print("  archivos que ya esten en disco de una corrida anterior de C2")
+        print("    resultados/modelo_regresion_C2/predicciones/npy/pred/")
+        print("    resultados/modelo_regresion_C2/predicciones/npy/pred_c2/")
+        print("    resultados/modelo_regresion_C2/predicciones/npy/diff_pred/")
+        print("  Si PREDICT_FROM/PREDICT_TO o el checkpoint cambiaron desde")
+        print("  entonces, se mezclaran predicciones de dos configuraciones")
+        print("  distintas SIN aviso. Los nombres de archivo son iguales.")
+        print("  Correr C2 tambien, o borrar esas tres carpetas antes.")
+        print("!" * 65)
         print()
     if not CORRER_C3 and CORRER_SEG:
-        print("AVISO: CORRER_C3=False — segmentación no tendrá")
-        print("  C3_prep predicho para frames sin GT.")
-        print("  Usará el último C3 real disponible como alternativa.")
+        print("!" * 65)
+        print("AVISO: CORRER_C3=False")
+        print("  Segmentacion leera el C3 predicho que ya este en disco:")
+        print("    resultados/modelo_regresion_c3/predicciones/npy/pred/")
+        print("  Mismo riesgo: archivos viejos con el mismo nombre pasan")
+        print("  desapercibidos. Correr C3 tambien, o borrar esa carpeta.")
+        print("!" * 65)
         print()
 
     pipeline = [
@@ -178,10 +209,11 @@ def main():
         print(f"  [{icono}] {nombre:<20} : {estado}")
 
     print(f"\nCarpetas de resultados:")
+    root = BASE_DIR.parent   # BASE_DIR apunta a scripts/, resultados/ esta un nivel arriba
     carpetas = [
-        BASE_DIR / 'resultados' / 'modelo_regresion_C2' / 'predicciones',
-        BASE_DIR / 'resultados' / 'modelo_regresion_c3' / 'predicciones',
-        BASE_DIR / 'resultados' / 'modelo_segmentacion' / 'predicciones',
+        root / 'resultados' / 'modelo_regresion_C2' / 'predicciones',
+        root / 'resultados' / 'modelo_regresion_c3' / 'predicciones',
+        root / 'resultados' / 'modelo_segmentacion' / 'predicciones',
     ]
     for c in carpetas:
         existe = '✓' if c.exists() else '✗'

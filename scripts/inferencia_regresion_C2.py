@@ -84,6 +84,15 @@ PREDICT_TO     = 45
 # Modo de inferencia
 INFERENCE_MODE = 'ambos'   # 'independiente' | 'autoregresiva' | 'ambos'
 
+# Renormaliza el diff encadenado a [0,1] para igualar la escala de los diffs
+# reales, que pasan por el min-max de load_npy().
+#   True  -> escala consistente con el entrenamiento (recomendado)
+#   False -> magnitud cruda del cambio entre frames
+NORMALIZAR_DIFF_ENCADENADO = True
+
+# Guarda el diff encadenado del modo autoregresivo en npy/diff_pred/
+GUARDAR_DIFF_AUTO = True
+
 # Resolver dimensiones
 if CROP_MODE == 'cuadrado':
     CROP_W, CROP_H = CROP_SIZE, CROP_SIZE
@@ -116,6 +125,27 @@ def load_npy(path):
     if mx - mn > 1e-8:
         arr = (arr - mn) / (mx - mn)
     return arr
+
+def norm01(arr):
+    """Min-max a [0,1]. Misma normalizacion que load_npy() aplica a los
+    archivos reales, para que el diff encadenado entre al modelo en la
+    misma escala que vio durante el entrenamiento."""
+    arr = arr.astype(np.float32)
+    mn, mx = arr.min(), arr.max()
+    if mx - mn > 1e-8:
+        arr = (arr - mn) / (mx - mn)
+    return arr
+
+def diff_encadenado(actual, anterior, normalizar=True):
+    """|C2[N] - C2[N-1]| entre los arrays REALMENTE usados como input.
+
+    'anterior' es lo que se alimento al modelo en el paso previo: en el
+    paso 1 es el C2 real del frame inicial, del paso 2 en adelante es la
+    prediccion del paso previo. Evita asumir que existe un C2_pred[N-1]
+    en el paso 1, que no es el caso.
+    """
+    d = np.abs(actual - anterior).astype(np.float32)
+    return norm01(d) if normalizar else d
 
 def build_input_tensor(c2_prep, c2_diff, c3_prep, device):
     x = np.stack([c2_prep, c2_diff, c3_prep], axis=0)
@@ -160,8 +190,10 @@ def print_mapeo(positions):
     print("─" * 65)
     for pos in positions:
         f_in   = get_file(idx_c2_prep, pos).stem
+        f_diff = get_file(idx_c2_diff, pos - 1).stem
         f_real = get_file(idx_c2_prep, pos + 1).stem
         print(f"  {pos:>4}  input        {f_in}")
+        print(f"  {pos-1:>4}  diff         {f_diff}")
         print(f"  {pos+1:>4}  C2 target    {f_real}")
         print()
     print("─" * 65)
@@ -192,7 +224,9 @@ def run_independiente(model, device, positions):
     results = []
     for pos in positions:
         c2_prep   = load_npy(get_file(idx_c2_prep, pos))
-        c2_diff   = load_npy(get_file(idx_c2_diff, pos))
+        # El diff del frame N esta en la posicion N-1. Usar 'pos' cargaria
+        # |C2[N+1] - C2[N]|, es decir el cambio hacia el target — fuga.
+        c2_diff   = load_npy(get_file(idx_c2_diff, pos - 1))
         c3_pos    = min(pos, len(idx_c3_prep))
         c3_prep   = load_npy(get_file(idx_c3_prep, c3_pos))
         c2_real   = load_npy(get_file(idx_c2_prep, pos + 1))
@@ -225,22 +259,35 @@ def run_independiente(model, device, positions):
 
 def run_autoregresiva(model, device, positions):
     print("─" * 65)
-    print("MODO: Autoregresiva (C2 predicho como input siguiente)")
+    print("MODO: Autoregresiva (C2 y C2_diff predichos como input siguiente)")
     print("─" * 65)
-    results   = []
-    prev_pred = None
+    results    = []
+    prev_pred  = None   # prediccion del paso anterior
+    prev_input = None   # array C2 realmente usado como input en el paso anterior
     for i, pos in enumerate(positions):
-        c2_diff  = load_npy(get_file(idx_c2_diff, pos))
         c3_pos   = min(pos, len(idx_c3_prep))  # clamp al último C3 disponible
         c3_prep  = load_npy(get_file(idx_c3_prep, c3_pos))
         c2_real  = load_npy(get_file(idx_c2_prep, pos + 1))
 
+        # --- C2_prep: paso 0 real, pasos siguientes predicho ---
         if i == 0 or prev_pred is None:
             c2_input = load_npy(get_file(idx_c2_prep, pos))
             fuente   = 'real'
         else:
             c2_input = prev_pred
             fuente   = 'predicha'
+
+        # --- C2_diff: paso 0 real, pasos siguientes ENCADENADO ---
+        # Paso 0  -> diff real del frame pos (posicion pos-1)
+        # Paso 1  -> |C2_pred[N] - C2_real[N-1]|
+        # Paso 2+ -> |C2_pred[N] - C2_pred[N-1]|
+        if i == 0 or prev_input is None:
+            c2_diff     = load_npy(get_file(idx_c2_diff, pos - 1))
+            diff_fuente = 'real'
+        else:
+            c2_diff     = diff_encadenado(c2_input, prev_input,
+                                          NORMALIZAR_DIFF_ENCADENADO)
+            diff_fuente = 'encadenado'
 
         tensor    = build_input_tensor(c2_input, c2_diff, c3_prep, device)
         pred      = predict(model, tensor)
@@ -251,13 +298,15 @@ def run_autoregresiva(model, device, positions):
         print(f"  Pos {pos:>3} [{fname_in[:30]}]")
         print(f"    → {pos+1:>3} [{fname_out[:30]}]")
         print(f"       SSIM={metrics['ssim']:.4f}  PSNR={metrics['psnr']:.2f} dB  "
-              f"MSE={metrics['mse']:.6f}  [C2: {fuente}]")
+              f"MSE={metrics['mse']:.6f}  [C2: {fuente} | diff: {diff_fuente}]")
 
         # Guardar NPY y PNG
         stem = f"frame_{pos+1:03d}_auto"
         save_frame_files(pred,                   stem + '_pred',  NPY_PRED,  PNG_PRED,  'RdBu_r')
         save_frame_files(c2_real,                stem + '_pred_con_gt',  NPY_REAL,  PNG_REAL,  'RdBu_r')
         save_frame_files(np.abs(pred - c2_real), stem + '_error', NPY_ERROR, PNG_ERROR, 'Reds')
+        if GUARDAR_DIFF_AUTO:
+            save_frame_files(c2_diff, stem + '_diff', NPY_DIFF_PRED, PNG_DIFF_PRED, 'hot')
 
         results.append({
             'pos_in': pos, 'pos_out': pos + 1,
@@ -266,8 +315,10 @@ def run_autoregresiva(model, device, positions):
             'pred': pred, 'real': c2_real,
             'metrics': metrics, 'modo': 'autoregresiva',
             'c2_fuente': fuente,
+            'diff_fuente': diff_fuente,
         })
-        prev_pred = pred
+        prev_pred  = pred
+        prev_input = c2_input   # clave: guarda el input, no solo la prediccion
     return results
 
 # =================================================================
@@ -285,11 +336,11 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
     e inferencia_regresion_C3.
     """
     print("─" * 65)
-    print("MODO: Sin ground truth (predicción encadenada con diff real)")
+    print("MODO: Sin ground truth (predicción y diff encadenados)")
     print("─" * 65)
-    results        = []
-    prev_pred      = None   # predicción del paso anterior
-    prev_prev_pred = None   # predicción de dos pasos atrás (para el diff)
+    results    = []
+    prev_pred  = None   # prediccion del paso anterior
+    prev_input = None   # array C2 usado como input en el paso anterior
 
     for i, pos in enumerate(positions):
         # C2 input: paso 0 = último real, siguientes = pred anterior
@@ -302,24 +353,22 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
             fuente   = f'C2 predicho frame {pos}'
 
         # Diff encadenado:
-        #   Paso 0 → último diff real disponible
-        #   Paso 1 → |pred[paso 0] - C2_real_ultimo|  (pred anterior vs. input anterior)
-        #   Paso 2+ → |pred[N-1] - pred[N-2]|
-        if i == 0:
-            diff_pos    = min(pos, n_diff)
+        #   Paso 0  -> diff real del ultimo frame disponible (posicion pos-1)
+        #   Paso 1  -> |pred[paso 0] - C2_real_ultimo|
+        #   Paso 2+ -> |pred[N] - pred[N-1]|
+        if i == 0 or prev_input is None:
+            diff_pos    = min(pos - 1, n_diff)
             c2_diff     = (load_npy(get_file(idx_c2_diff, diff_pos))
                            if diff_pos >= 1
                            else np.zeros((CROP_H, CROP_W), dtype=np.float32))
             diff_fuente = f'real (pos {diff_pos})'
         else:
-            # c2_input en este punto YA ES prev_pred, así que usamos prev_prev_pred
-            ref_anterior = prev_prev_pred if prev_prev_pred is not None else load_npy(get_file(idx_c2_prep, min(pos-1, n_c2)))
-            c2_diff      = np.abs(prev_pred - ref_anterior).astype(np.float32)
-            diff_fuente  = f'encadenado |pred[{pos}] - pred[{pos-1}]|'
+            c2_diff     = diff_encadenado(c2_input, prev_input,
+                                          NORMALIZAR_DIFF_ENCADENADO)
+            diff_fuente = f'encadenado |in[{pos}] - in[{pos-1}]|'
 
         # C3_prep: usar el último disponible
-        c3_pos  = min(pos, n_diff)  # n_diff aproxima n_c3 en este contexto
-        c3_pos  = min(c3_pos, len(idx_c3_prep))
+        c3_pos  = min(pos, len(idx_c3_prep))
         c3_prep = load_npy(get_file(idx_c3_prep, c3_pos))
 
         tensor = build_input_tensor(c2_input, c2_diff, c3_prep, device)
@@ -350,7 +399,8 @@ def run_sin_gt(model, device, positions, n_c2, n_diff):
             'pred': pred, 'real': None,
             'metrics': None, 'modo': 'sin_gt',
         })
-        prev_pred = pred
+        prev_pred  = pred
+        prev_input = c2_input
     return results
 
 # =================================================================
@@ -592,8 +642,10 @@ def main():
     n_diff  = len(idx_c2_diff)
     n_c3    = len(idx_c3_prep)
 
-    if PREDICT_FROM < 2:
-        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Mínimo es 2.')
+    if PREDICT_FROM < 3:
+        print(f'ERROR: PREDICT_FROM={PREDICT_FROM} invalido. Mínimo es 3.')
+        print('  Para predecir el frame N se usa el input en pos N-1 y el diff')
+        print('  en pos N-2. Con N=2 el indice del diff seria 0, fuera de rango.')
         return
     if PREDICT_FROM - 1 > n_files:
         print(f'ERROR: el input requerido (pos {PREDICT_FROM-1}) no existe '
@@ -612,7 +664,7 @@ def main():
         print(f'Con ground truth     : frames {[p+1 for p in pos_con_gt]}')
     if pos_sin_gt:
         print(f'Sin ground truth     : frames {[p+1 for p in pos_sin_gt]} '
-              f'(predicción encadenada con diff real)')
+              f'(predicción y diff encadenados)')
     print()
     if pos_con_gt:
         print_mapeo(pos_con_gt)

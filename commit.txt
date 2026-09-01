@@ -1,0 +1,35 @@
+Fix: corrige fuga de datos por desfase en el indice de C2_diff
+
+La carpeta diff/ arranca un frame despues que canal_2/ (39 vs 40
+archivos), pero ambas se indexaban por la misma posicion. El modelo
+recibia |C2[N+1] - C2[N]| como tercer canal para predecir C2[N+1]:
+la magnitud exacta del cambio hacia su propio target.
+
+Entrenamiento (los 3 modelos):
+- Indice del diff pasa de pos a pos-1
+- Posiciones validas arrancan en 2; dataset de 39 a 38 pares (32/6)
+- Los print de diagnostico ahora muestran el diff que se carga
+
+Inferencia (los 3 scripts):
+- Mismo ajuste de indice en los 3 modos
+- PREDICT_FROM minimo sube de 2 a 3
+- print_mapeo incluye el archivo de diff
+
+Modo autoregresivo, redefinido como pipeline completo:
+- C2 encadena su diff desde el paso 1 (|C2_pred[N] - C2_input[N-1]|)
+- C3 y Seg consumen las salidas autoregresivas de C2 y C3 en vez de
+  datos reales; antes 2 de 3 canales eran ground truth del futuro
+- Seg alimenta fase continua en el slot C3_prep, no su mascara binaria
+
+Otras correcciones:
+- run_sin_gt: prev_prev_pred nunca se asignaba; load_pred_c2 y
+  load_pred_c3 pedian el frame target en vez del de input; C3 se
+  acotaba con n_diff en vez de n_c3
+- reporte_visual: reconstruye los inputs segun modo y paso, empareja
+  por numero de frame, secciones para ambos modos, exporta
+  predicciones a predicciones_frames/
+- Panel |Pred - C3_prep| sustituido por |Prob - Mascara|
+- Mascaras binarias con colormap invertido (gray_r)
+
+Los 3 modelos fueron reentrenados. Las metricas anteriores del Cap. 5
+no son validas.

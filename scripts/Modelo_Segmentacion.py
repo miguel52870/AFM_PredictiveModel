@@ -51,9 +51,11 @@ LOG_CSV      = OUTPUT_DIR / 'training_log.csv'
 # --- DATASET ---
 # Los archivos se indexan por POSICIÓN en lista ordenada alfabéticamente (base 1).
 # Un par válido es (posición N como input, posición N+1 como target).
-# idx_c2_diff determina el número de pares disponibles (tiene menos archivos que mask).
-# Con 39 archivos diff y 40 mask → 39 pares posibles (pos 1..39)
-# Split: posiciones 1..33 train, 34..39 val → 33 train / 6 val
+# El diff del frame N está en idx_c2_diff[N-1]: la carpeta diff/ tiene 39
+# archivos (frames 2..40) porque el frame 1 no tiene frame anterior, mientras
+# mask/ tiene 40. Por eso la posición 1 no puede ser input.
+# Con 39 archivos diff y 40 mask → 38 pares posibles (pos 2..39)
+# Split: posiciones 2..33 train, 34..39 val → 32 train / 6 val
 #
 
 # --- MODO DE RECORTE ---
@@ -196,7 +198,11 @@ class FerroelectricDataset(Dataset):
         pos = self.positions[idx]
 
         c2_prep = self._load_npy(get_file(idx_c2_prep, pos))
-        c2_diff = self._load_npy(get_file(idx_c2_diff, pos))
+        # El diff del frame N esta en la posicion N-1: diff/ arranca un frame
+        # despues que canal_2/ porque el primer frame no tiene frame anterior.
+        # Usar 'pos' aqui cargaria |C2[N+1] - C2[N]|, informacion del frame
+        # target — fuga de informacion.
+        c2_diff = self._load_npy(get_file(idx_c2_diff, pos - 1))
         c3_prep = self._load_npy(get_file(idx_c3_prep, pos))
         mask    = self._load_mask(get_file(idx_c3_mask, pos + 1))
 
@@ -298,9 +304,11 @@ def main():
     print(f"Archivos C3_mask : {n_mask}")
 
     # Pares válidos: posición N como input, N+1 como target de mask
-    # idx_c2_diff va de pos 1..n_diff
+    # El diff del frame N está en idx_c2_diff[N-1], por lo que:
+    #   - la posición 1 no tiene diff previo → se excluye
+    #   - el límite superior es n_diff + 1, y el filtro de mask lo acota
     # idx_c3_mask va de pos 1..n_mask, necesitamos pos+1 → hasta n_mask
-    all_positions  = list(range(1, n_diff + 1))   # 1..n_diff
+    all_positions  = list(range(2, n_diff + 2))   # 2..n_diff+1
     # Verificar que pos+1 existe en mask para todos los pares
     all_positions  = [p for p in all_positions if p + 1 <= n_mask]
 
@@ -311,11 +319,11 @@ def main():
     print(f"Modo recorte     : {CROP_MODE} ({crop_label})")
     print(f"Pares válidos    : {len(all_positions)}")
     print(f"\nTrain : {len(train_positions)} pares")
-    print(f"  Posición {train_positions[0]:>3} → archivo: {get_file(idx_c2_diff, train_positions[0]).stem}")
-    print(f"  Posición {train_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, train_positions[-1]).stem}")
+    print(f"  Posición {train_positions[0]:>3} → archivo: {get_file(idx_c2_diff, train_positions[0] - 1).stem}")
+    print(f"  Posición {train_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, train_positions[-1] - 1).stem}")
     print(f"Val   : {len(val_positions)} pares")
-    print(f"  Posición {val_positions[0]:>3} → archivo: {get_file(idx_c2_diff, val_positions[0]).stem}")
-    print(f"  Posición {val_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, val_positions[-1]).stem}\n")
+    print(f"  Posición {val_positions[0]:>3} → archivo: {get_file(idx_c2_diff, val_positions[0] - 1).stem}")
+    print(f"  Posición {val_positions[-1]:>3} → archivo: {get_file(idx_c2_diff, val_positions[-1] - 1).stem}\n")
 
     # --- DataLoaders ---
     train_loader = DataLoader(
